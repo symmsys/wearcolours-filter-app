@@ -99,7 +99,7 @@ async function fetchAllCollections(admin) {
         query Collections($first: Int!, $after: String) {
           collections(first: $first, after: $after, sortKey: TITLE) {
             pageInfo { hasNextPage endCursor }
-            edges { node { id title } }
+            edges { node { id title handle } }
           }
         }
       `,
@@ -111,7 +111,13 @@ async function fetchAllCollections(admin) {
     const edges = conn?.edges || [];
 
     for (const e of edges) {
-      if (e?.node?.id) all.push({ id: e.node.id, title: e.node.title || "" });
+      if (e?.node?.id) {
+        all.push({
+          id: e.node.id,
+          title: e.node.title || "",
+          handle: e.node.handle || "",
+        });
+      }
     }
 
     const pageInfo = conn?.pageInfo;
@@ -133,13 +139,14 @@ async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50
             node {
               id
               title
+              handle
               metafield(namespace: "${GRADE_NAMESPACE}", key: "${GRADE_KEY}") { value }
               featuredImage { url altText }
               variants(first: 250) {
                 edges { node { selectedOptions { name value } } }
               }
               collections(first: 1) {
-                edges { node { id title } }
+                edges { node { id title handle } }
               }
             }
           }
@@ -182,6 +189,7 @@ async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50
     return {
       id: p.id,
       title: p.title || "",
+      handle: p.handle || "",
       grade: p?.metafield?.value || "",
       imageUrl: p?.featuredImage?.url || "",
       size: collectArray("size"),
@@ -189,6 +197,7 @@ async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50
       size_range: firstValue("size range"),
       collectionId: firstCol?.id || "",
       collectionTitle: firstCol?.title || "",
+      collectionHandle: firstCol?.handle || "",
     };
   });
 
@@ -210,6 +219,7 @@ async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50
         collectionsByProductId[pId].push({
           id: record.collection_id,
           title: record.collection_title,
+          handle: record.collection_handle || "",
           grade: record.grade || "",
         });
       }
@@ -224,6 +234,7 @@ async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50
         ...item,
         collectionId: savedCollections[0]?.id || "",
         collectionTitle: savedCollections[0]?.title || "",
+        collectionHandle: savedCollections[0]?.handle || "",
         savedCollections,
       };
     }
@@ -323,7 +334,7 @@ export const action = async ({ request }) => {
 
   const intent = cleanText(form.get("intent"));
 
-  // NEW: delete only one collection row from external DB
+  // delete only one collection row from external DB
   if (intent === "deleteCollection") {
     const productId = cleanText(form.get("productId"));
     const collectionId = cleanText(form.get("collectionId"));
@@ -350,6 +361,7 @@ export const action = async ({ request }) => {
 
   const productId = cleanText(form.get("productId"));
   const productTitle = cleanText(form.get("productTitle"));
+  const productHandle = cleanText(form.get("productHandle"));
   const collectionGradesJson = form.get("collectionGrades");
 
   if (!productId) return { ok: false, error: "Missing productId" };
@@ -382,11 +394,46 @@ export const action = async ({ request }) => {
       }
     }
 
+    // Ensure collection handle (and title when possible) exists for each collection item.
+    // If a saved item is missing the `handle`, fetch it from Shopify by collection ID.
+    for (let i = 0; i < collectionGradesList.length; i++) {
+      const item = collectionGradesList[i] || {};
+      const hasId = item.id && String(item.id).trim() !== "";
+      const missingHandle = !item.handle || String(item.handle).trim() === "";
+      if (hasId && missingHandle) {
+        try {
+          const res = await admin.graphql(
+            `#graphql
+              query NodeCollection($id: ID!) {
+                node(id: $id) {
+                  ... on Collection { id handle title }
+                }
+              }
+            `,
+            { variables: { id: item.id } }
+          );
+
+          const json = await parseGraphql(res);
+          const node = json?.data?.node;
+          if (node) {
+            collectionGradesList[i].handle = node.handle || collectionGradesList[i].handle || "";
+            collectionGradesList[i].title = collectionGradesList[i].title || node.title || collectionGradesList[i].title || "";
+          }
+        } catch (err) {
+          console.error("Failed to fetch collection handle for", item.id, err);
+        }
+      }
+    }
+
     const upsertRecords = collectionGradesList.map((item) => ({
       shopify_product_id: productId,
       product_title: productTitle || null,
+      product_handle: productHandle || null,
+
       collection_id: item.id || null,
       collection_title: item.title || null,
+      collection_handle: String(item.handle ?? "").trim() || null,
+
       grade: String(item.grade ?? "").trim() || null,
       size_range: sizeRangeVal,
       size_type: sizeTypeVal,
@@ -431,16 +478,19 @@ export default function GradeCollectionPage() {
   const saveError = fetcher.data?.ok === false ? fetcher.data.error : null;
   const deleteError = deleteFetcher.data?.ok === false ? deleteFetcher.data.error : null;
 
-
-  const ALLOWED_COLLECTION_GIDS = useMemo(() => new Set([
-    "gid://shopify/Collection/276875509831",
-    "gid://shopify/Collection/276875247687",
-    "gid://shopify/Collection/276039368775",
-    "gid://shopify/Collection/276875411527",
-    "gid://shopify/Collection/276875444295",
-    "gid://shopify/Collection/276875280455",
-    "gid://shopify/Collection/282935689287",
-  ]), []);
+  const ALLOWED_COLLECTION_GIDS = useMemo(
+    () =>
+      new Set([
+        "gid://shopify/Collection/276875509831",
+        "gid://shopify/Collection/276875247687",
+        "gid://shopify/Collection/276039368775",
+        "gid://shopify/Collection/276875411527",
+        "gid://shopify/Collection/276875444295",
+        "gid://shopify/Collection/276875280455",
+        "gid://shopify/Collection/282935689287",
+      ]),
+    []
+  );
 
   const allowedCollections = useMemo(() => {
     return (collections || []).filter((c) => ALLOWED_COLLECTION_GIDS.has(String(c.id)));
@@ -456,13 +506,26 @@ export default function GradeCollectionPage() {
     return m;
   }, [allowedCollections]);
 
+  const gidToHandle = useMemo(() => {
+    const m = new Map();
+    for (const c of allowedCollections) m.set(String(c.id), String(c.handle || ""));
+    return m;
+  }, [allowedCollections]);
+
   useEffect(() => {
     const cg = {};
     for (const p of products) {
       if (p.savedCollections && p.savedCollections.length > 0) {
         cg[p.id] = p.savedCollections;
       } else if (p.collectionId && p.collectionTitle) {
-        cg[p.id] = [{ id: p.collectionId, title: p.collectionTitle, grade: p.grade || "" }];
+        cg[p.id] = [
+          {
+            id: p.collectionId,
+            title: p.collectionTitle,
+            handle: p.collectionHandle || "",
+            grade: p.grade || "",
+          },
+        ];
       } else {
         cg[p.id] = [];
       }
@@ -480,9 +543,11 @@ export default function GradeCollectionPage() {
       const alreadyExists = collectionsData.some((c) => c.id === draft.collectionId);
       if (!alreadyExists) {
         const titleFromList = gidToTitle.get(String(draft.collectionId)) || "";
+        const handleFromList = gidToHandle.get(String(draft.collectionId)) || "";
         collectionsData.push({
           id: draft.collectionId,
           title: titleFromList || draft.collectionId,
+          handle: handleFromList,
           grade: String(draft.grade ?? ""),
         });
       }
@@ -501,6 +566,7 @@ export default function GradeCollectionPage() {
         intent: "saveRow",
         productId: p.id,
         productTitle: p.title,
+        productHandle: p.handle || "",
         collectionGrades: JSON.stringify(collectionsData),
         size_range: p.size_range || "",
         size_type: p.size_type || "",
@@ -532,11 +598,7 @@ export default function GradeCollectionPage() {
   };
 
   const headings = useMemo(
-    () => [
-      { title: "Product" },
-      { title: "Collections and grade" },
-      { title: "Action" },
-    ],
+    () => [{ title: "Product" }, { title: "Collections and grade" }, { title: "Action" }],
     []
   );
 
@@ -581,10 +643,18 @@ export default function GradeCollectionPage() {
                       p.savedCollections && p.savedCollections.length > 0
                         ? p.savedCollections
                         : p.collectionId && p.collectionTitle
-                          ? [{ id: p.collectionId, title: p.collectionTitle, grade: p.grade || "" }]
+                          ? [
+                            {
+                              id: p.collectionId,
+                              title: p.collectionTitle,
+                              handle: p.collectionHandle || "",
+                              grade: p.grade || "",
+                            },
+                          ]
                           : [];
 
-                    const changed = JSON.stringify(currentCollectionGrades) !== JSON.stringify(originalCollectionGrades);
+                    const changed =
+                      JSON.stringify(currentCollectionGrades) !== JSON.stringify(originalCollectionGrades);
 
                     const savingThisRow = isSaving && fetcher.formData?.get("productId") === p.id;
 
@@ -617,12 +687,7 @@ export default function GradeCollectionPage() {
                                 deleteFetcher.formData?.get("collectionId") === collItem.id;
 
                               return (
-                                <InlineStack
-                                  key={`${p.id}-collgrade-${colIdx}`}
-                                  gap="200"
-                                  blockAlign="center"
-                                  wrap={false}
-                                >
+                                <InlineStack key={`${p.id}-collgrade-${colIdx}`} gap="200" blockAlign="center" wrap={false}>
                                   <div style={{ width: 120, textOverflow: "ellipsis", whiteSpace: "normal" }}>
                                     <Badge tone="info">{collItem.title}</Badge>
                                   </div>
@@ -647,7 +712,6 @@ export default function GradeCollectionPage() {
                                     />
                                   </div>
 
-
                                   <Button
                                     size="slim"
                                     variant="plain"
@@ -658,8 +722,6 @@ export default function GradeCollectionPage() {
                                     accessibilityLabel={`Remove ${collItem.title}`}
                                     onClick={() => deleteOneCollection(p.id, collItem.id, colIdx)}
                                   />
-
-
                                 </InlineStack>
                               );
                             })}
@@ -679,6 +741,7 @@ export default function GradeCollectionPage() {
                                       if (!v) return;
 
                                       const title = gidToTitle.get(String(v)) || "";
+                                      const handle = gidToHandle.get(String(v)) || "";
                                       setCollectionGradeByProductId((prev) => {
                                         const existing = prev[p.id] || [];
                                         if (existing.some((c) => c.id === v)) return prev;
@@ -686,7 +749,12 @@ export default function GradeCollectionPage() {
                                           ...prev,
                                           [p.id]: [
                                             ...existing,
-                                            { id: v, title: title || String(v), grade: String(addDraftByProductId[p.id]?.grade ?? "") },
+                                            {
+                                              id: v,
+                                              title: title || String(v),
+                                              handle,
+                                              grade: String(addDraftByProductId[p.id]?.grade ?? ""),
+                                            },
                                           ],
                                         };
                                       });
@@ -720,14 +788,17 @@ export default function GradeCollectionPage() {
                                   />
                                 </div>
 
-                                <Button size="slim" onClick={() => {
-                                  setAddingCollectionFor(null);
-                                  setAddDraftByProductId((prev) => {
-                                    const next = { ...prev };
-                                    delete next[p.id];
-                                    return next;
-                                  });
-                                }}>
+                                <Button
+                                  size="slim"
+                                  onClick={() => {
+                                    setAddingCollectionFor(null);
+                                    setAddDraftByProductId((prev) => {
+                                      const next = { ...prev };
+                                      delete next[p.id];
+                                      return next;
+                                    });
+                                  }}
+                                >
                                   Cancel
                                 </Button>
                               </InlineStack>
@@ -735,7 +806,6 @@ export default function GradeCollectionPage() {
                               <InlineStack gap="200" blockAlign="center" wrap={false}>
                                 <div style={{ minWidth: 180 }} />
                                 <div style={{ minWidth: 220 }} />
-
                               </InlineStack>
                             )}
                           </BlockStack>
@@ -754,12 +824,7 @@ export default function GradeCollectionPage() {
                           >
                             {/* Add button (left) */}
                             {addingCollectionFor !== p.id ? (
-                              <Button
-                                variant="primary"
-                                tone="success"
-                                size="slim"
-                                onClick={() => setAddingCollectionFor(p.id)}
-                              >
+                              <Button variant="primary" tone="success" size="slim" onClick={() => setAddingCollectionFor(p.id)}>
                                 +
                               </Button>
                             ) : (
@@ -777,10 +842,6 @@ export default function GradeCollectionPage() {
                             </Button>
                           </div>
                         </IndexTable.Cell>
-
-
-
-
                       </IndexTable.Row>
                     );
                   })}

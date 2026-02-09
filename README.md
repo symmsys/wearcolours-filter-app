@@ -69,6 +69,17 @@ CREATE INDEX IF NOT EXISTS idx_pgc_shopify_product
 
 CREATE INDEX IF NOT EXISTS idx_pgc_updated_at
   ON public.product_grade_collection (updated_at DESC);
+
+ALTER TABLE public.product_grade_collection
+ADD COLUMN IF NOT EXISTS product_handle text NULL,
+ADD COLUMN IF NOT EXISTS collection_handle text NULL;
+
+-- Optional but recommended indexes
+CREATE INDEX IF NOT EXISTS idx_pgc_product_handle
+  ON public.product_grade_collection (product_handle);
+
+CREATE INDEX IF NOT EXISTS idx_pgc_collection_handle
+  ON public.product_grade_collection (collection_handle);
 ```
 
 This table allows:
