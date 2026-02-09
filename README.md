@@ -261,15 +261,3 @@ This repository contains the  **initial implementation** :
 * Multi-school mapping UI
 * External data persistence
 * Prisma-backed session storage
-
-### Database Indexes (Recommended)
-
-For better query performance, especially with large datasets, create the following indexes:
-
-```sql
-CREATE INDEX IF NOT EXISTS idx_pgc_shopify_product
-ON public.product_grade_collection (shopify_product_id);
-
-CREATE INDEX IF NOT EXISTS idx_pgc_updated_at
-ON public.product_grade_collection (updated_at DESC);
-```
