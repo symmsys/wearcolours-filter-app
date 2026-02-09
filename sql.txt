@@ -1,0 +1,22 @@
+File for sql queries
+
+CREATE TABLE IF NOT EXISTS public.product_grade_collection (
+  id bigserial PRIMARY KEY,
+  shopify_product_id text NOT NULL,
+  product_title text,
+  grade text,
+  collection_id text,
+  collection_title text,
+  size_range text,
+  size_type text,
+  size text[] DEFAULT '{}'::text[],
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT product_grade_collection_product_collection_unique
+    UNIQUE (shopify_product_id, collection_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pgc_shopify_product
+  ON public.product_grade_collection (shopify_product_id);
+
+CREATE INDEX IF NOT EXISTS idx_pgc_updated_at
+  ON public.product_grade_collection (updated_at DESC);

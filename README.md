@@ -5,8 +5,6 @@ This is a Shopify embedded admin app that allows a **single Shopify product to b
 The app **does not modify Shopify product data**.
 All mappings are stored externally (Supabase), making it safe to install on live stores.
 
----
-
 ## What This App Does
 
 - Reads products from Shopify Admin
@@ -23,8 +21,6 @@ This is designed for school uniform businesses where:
 - the same item (e.g. white shirt) is used by multiple schools
 - product duplication is not acceptable
 
----
-
 ## What This App Does NOT Do
 
 - Does not change Shopify products
@@ -33,8 +29,6 @@ This is designed for school uniform businesses where:
 - Does not require theme changes
 
 Installing or uninstalling this app is **non-destructive**.
-
----
 
 ## High-Level Architecture
 
@@ -50,35 +44,37 @@ Installing or uninstalling this app is **non-destructive**.
 - Stores Shopify session data via Prisma
 - Acts as an overlay data layer
 
----
-
 ## Database Schema
 
 ### `product_grade_collection`
 
 ```sql
-create table public.product_grade_collection (
-  id bigserial primary key,
-  shopify_product_id text not null,
+CREATE TABLE IF NOT EXISTS public.product_grade_collection (
+  id bigserial PRIMARY KEY,
+  shopify_product_id text NOT NULL,
   product_title text,
   grade text,
   collection_id text,
   collection_title text,
   size_range text,
   size_type text,
-  size text[] default '{}',
-  updated_at timestamptz not null default now(),
-  constraint product_collection_unique unique (shopify_product_id, collection_id)
+  size text[] DEFAULT '{}'::text[],
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT product_grade_collection_product_collection_unique
+    UNIQUE (shopify_product_id, collection_id)
 );
-```
 
+CREATE INDEX IF NOT EXISTS idx_pgc_shopify_product
+  ON public.product_grade_collection (shopify_product_id);
+
+CREATE INDEX IF NOT EXISTS idx_pgc_updated_at
+  ON public.product_grade_collection (updated_at DESC);
+```
 
 This table allows:
 
 * one product → many collections(school)
 * grade and size metadata per mapping
-
----
 
 ## Tech Stack
 
@@ -106,11 +102,9 @@ SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 DATABASE_URL=
 
-
 `DATABASE_URL` must be a  **PostgreSQL connection string** .
 
 It is used by Prisma to store Shopify OAuth sessions.
-
 
 ## Supabase Setup (Required)
 
@@ -137,14 +131,12 @@ Example:
 
 postgresql://postgres:`<password>`@db.xxxxx.supabase.co:5432/postgres
 
-
 Set this value as:
 
 <pre class="overflow-visible! px-0!" data-start="3443" data-end="3464"><div class="contain-inline-size rounded-2xl corner-superellipse/1.1 relative bg-token-sidebar-surface-primary"><div class="sticky top-[calc(var(--sticky-padding-top)+9*var(--spacing))]"><div class="absolute end-0 bottom-0 flex h-9 items-center pe-2"><div class="bg-token-bg-elevated-secondary text-token-text-secondary flex items-center gap-4 rounded-sm px-2 font-sans text-xs"></div></div></div><div class="overflow-y-auto p-4" dir="ltr"><code class="whitespace-pre!"><span><span>DATABASE_URL=
 </span></span></code></div></div></pre>
 
 in your `.env` file.
-
 
 ### Step 3: Create Mapping Table
 
@@ -218,7 +210,6 @@ Example using Cloudflare tunnel:
 
 <pre class="overflow-visible! px-0!" data-start="4762" data-end="4820"><div class="contain-inline-size rounded-2xl corner-superellipse/1.1 relative bg-token-sidebar-surface-primary"><div class="sticky top-[calc(var(--sticky-padding-top)+9*var(--spacing))]"><div class="absolute end-0 bottom-0 flex h-9 items-center pe-2"><div class="bg-token-bg-elevated-secondary text-token-text-secondary flex items-center gap-4 rounded-sm px-2 font-sans text-xs"></div></div></div><div class="overflow-y-auto p-4" dir="ltr"><code class="whitespace-pre! language-bash"><span><span>cloudflared tunnel --url http://localhost:3000</span></span></code></div></div></pre>
 
-
 ### Step 5: Configure Shopify App URLs
 
 In  **Shopify Partner Dashboard → App setup** :
@@ -270,3 +261,15 @@ This repository contains the  **initial implementation** :
 * Multi-school mapping UI
 * External data persistence
 * Prisma-backed session storage
+
+### Database Indexes (Recommended)
+
+For better query performance, especially with large datasets, create the following indexes:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_pgc_shopify_product
+ON public.product_grade_collection (shopify_product_id);
+
+CREATE INDEX IF NOT EXISTS idx_pgc_updated_at
+ON public.product_grade_collection (updated_at DESC);
+```
