@@ -1,6 +1,6 @@
 // app/routes/app._index.jsx
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useFetcher, useLoaderData } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -21,11 +21,13 @@ import {
   Select,
   Pagination,
   Badge,
+  ProgressBar,
 } from "@shopify/polaris";
 
 import { DeleteIcon } from "@shopify/polaris-icons";
 
 const EXTERNAL_TABLE = "product_grade_collection";
+const MASTER_TABLE = "master database colours"; // exact name, with spaces
 
 // Shopify metafield: custom.grade
 const GRADE_NAMESPACE = "custom";
@@ -59,6 +61,25 @@ const COLLECTION_REMOVE_PRODUCTS = `#graphql
 
 function cleanText(v) {
   return String(v ?? "").trim();
+}
+
+function toInt(v, fallback = 0) {
+  const n = Number.parseInt(String(v ?? ""), 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function uniqStrings(arr) {
+  const out = [];
+  const seen = new Set();
+  for (const v of arr || []) {
+    const s = cleanText(v);
+    if (!s) continue;
+    const k = s.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(s);
+  }
+  return out;
 }
 
 function getGqlErrors(json) {
@@ -162,7 +183,6 @@ async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50
   const items = (conn?.edges || []).map((e) => {
     const p = e.node;
     const firstCol = p?.collections?.edges?.[0]?.node || null;
-
     const variantEdges = p?.variants?.edges || [];
 
     const collectArray = (optName) => {
@@ -201,20 +221,14 @@ async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50
     };
   });
 
-  // Fetch saved collection-grade data from Supabase
   const { data: savedData, error: fetchErr } = await supabase.from(EXTERNAL_TABLE).select("*");
-
-  if (fetchErr) {
-    console.error("Error fetching from Supabase:", fetchErr);
-  }
+  if (fetchErr) console.error("Error fetching from Supabase:", fetchErr);
 
   const collectionsByProductId = {};
   if (savedData && Array.isArray(savedData)) {
     for (const record of savedData) {
       const pId = record.shopify_product_id;
-      if (!collectionsByProductId[pId]) {
-        collectionsByProductId[pId] = [];
-      }
+      if (!collectionsByProductId[pId]) collectionsByProductId[pId] = [];
       if (record.collection_id && record.collection_title) {
         collectionsByProductId[pId].push({
           id: record.collection_id,
@@ -228,7 +242,6 @@ async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50
 
   const mergedItems = items.map((item) => {
     const savedCollections = collectionsByProductId[item.id] || [];
-
     if (savedCollections.length > 0) {
       return {
         ...item,
@@ -238,11 +251,7 @@ async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50
         savedCollections,
       };
     }
-
-    return {
-      ...item,
-      savedCollections: [],
-    };
+    return { ...item, savedCollections: [] };
   });
 
   return {
@@ -252,49 +261,104 @@ async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50
   };
 }
 
-async function setProductGrade(admin, productId, gradeValue) {
-  const value = String(gradeValue ?? "").trim();
+// Fetch product, all collections, and sizes from Shopify
+async function fetchProductByHandleWithCollectionsAndSizes(admin, handle) {
+  const res = await admin.graphql(
+    `#graphql
+      query ProductByHandle($handle: String!, $cFirst: Int!, $cAfter: String) {
+        productByHandle(handle: $handle) {
+          id
+          title
+          handle
+          variants(first: 250) {
+            edges { node { selectedOptions { name value } } }
+          }
+          collections(first: $cFirst, after: $cAfter) {
+            pageInfo { hasNextPage endCursor }
+            edges { node { id title handle } }
+          }
+        }
+      }
+    `,
+    { variables: { handle, cFirst: 250, cAfter: null } }
+  );
 
-  const res = await admin.graphql(METAFIELDS_SET, {
-    variables: {
-      metafields: [
-        {
-          ownerId: productId,
-          namespace: GRADE_NAMESPACE,
-          key: GRADE_KEY,
-          type: GRADE_TYPE,
-          value,
-        },
-      ],
-    },
-  });
+  const json = await parseGraphql(res);
+  const p = json?.data?.productByHandle;
+  if (!p?.id) return null;
 
-  await parseGraphql(res, {
-    nodeName: "metafieldsSet",
-    nodeGetter: (j) => j?.data?.metafieldsSet,
-  });
+  // collect sizes (variant option name "Size")
+  const variantEdges = p?.variants?.edges || [];
+  const sizes = [];
+  for (const ve of variantEdges) {
+    const opts = ve?.node?.selectedOptions || [];
+    for (const o of opts) {
+      if (String(o?.name || "").toLowerCase() === "size" && o?.value) sizes.push(o.value);
+    }
+  }
+
+  // paginate collections if needed
+  let cols = (p.collections?.edges || []).map((e) => e.node).filter(Boolean);
+  let after = p.collections?.pageInfo?.endCursor || null;
+  let hasNext = !!p.collections?.pageInfo?.hasNextPage;
+
+  while (hasNext) {
+    const res2 = await admin.graphql(
+      `#graphql
+        query ProductCollections($handle: String!, $first: Int!, $after: String) {
+          productByHandle(handle: $handle) {
+            collections(first: $first, after: $after) {
+              pageInfo { hasNextPage endCursor }
+              edges { node { id title handle } }
+            }
+          }
+        }
+      `,
+      { variables: { handle, first: 250, after } }
+    );
+
+    const json2 = await parseGraphql(res2);
+    const conn = json2?.data?.productByHandle?.collections;
+    const edges = conn?.edges || [];
+    cols = cols.concat(edges.map((e) => e.node).filter(Boolean));
+
+    hasNext = !!conn?.pageInfo?.hasNextPage;
+    after = conn?.pageInfo?.endCursor || null;
+    if (!after) break;
+  }
+
+  // de-dupe collections
+  const seen = new Set();
+  const uniqCols = [];
+  for (const c of cols) {
+    const id = String(c?.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    uniqCols.push({
+      id,
+      title: c?.title || "",
+      handle: c?.handle || "",
+    });
+  }
+
+  return {
+    id: p.id,
+    title: p.title || "",
+    handle: p.handle || "",
+    sizes: uniqStrings(sizes),
+    collections: uniqCols,
+  };
 }
 
-async function addToCollection(admin, collectionId, productId) {
-  const res = await admin.graphql(COLLECTION_ADD_PRODUCTS, {
-    variables: { collectionId, productIds: [productId] },
-  });
-
-  await parseGraphql(res, {
-    nodeName: "collectionAddProducts",
-    nodeGetter: (j) => j?.data?.collectionAddProducts,
-  });
-}
-
-async function removeFromCollection(admin, collectionId, productId) {
-  const res = await admin.graphql(COLLECTION_REMOVE_PRODUCTS, {
-    variables: { collectionId, productIds: [productId] },
-  });
-
-  await parseGraphql(res, {
-    nodeName: "collectionRemoveProducts",
-    nodeGetter: (j) => j?.data?.collectionRemoveProducts,
-  });
+function safeErrToString(e) {
+  if (!e) return "Unknown error";
+  if (typeof e === "string") return e;
+  if (e?.message && typeof e.message === "string") return e.message;
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
 }
 
 /* ---------------- LOADER ---------------- */
@@ -305,13 +369,22 @@ export const loader = async ({ request }) => {
   const supabase = getSupabaseAdmin();
 
   const url = new URL(request.url);
-  const after = url.searchParams.get("after"); // cursor
+  const after = url.searchParams.get("after");
+
   const { items, hasNextPage, endCursor } = await fetchProductsWithGradeAndCollection(admin, supabase, {
     first: 50,
     after: after || null,
   });
 
   const collections = await fetchAllCollections(admin);
+
+  let masterTotal = null;
+  try {
+    const { count, error } = await supabase.from(MASTER_TABLE).select('"Handle"', { count: "exact", head: true });
+    if (!error && typeof count === "number") masterTotal = count;
+  } catch {
+    // ignore
+  }
 
   return {
     shop,
@@ -320,19 +393,223 @@ export const loader = async ({ request }) => {
     hasNextPage,
     endCursor,
     after: after || null,
+    masterTotal,
   };
 };
 
 /* ---------------- ACTION ---------------- */
 
 export const action = async ({ request }) => {
-  const { admin, session } = await authenticate.admin(request);
-  const shop = session?.shop || "";
-
+  const { admin } = await authenticate.admin(request);
   const supabase = getSupabaseAdmin();
   const form = await request.formData();
-
   const intent = cleanText(form.get("intent"));
+
+  // Sync ONLY: process N master rows at a time. UI can auto-chain.
+  if (intent === "syncGradesBatch") {
+    const offset = Math.max(0, toInt(form.get("offset"), 0));
+    const limit = Math.max(1, Math.min(200, toInt(form.get("limit"), 50)));
+
+    // Run totals come from the client, but are UPDATED on the server each batch.
+    let runTotals = {
+      batches: 0,
+      uniqueHandles: 0,
+      updatedHandles: 0,
+      updatedRows: 0,
+      insertedProducts: 0,
+      insertedRows: 0,
+      missingInShopify: 0,
+    };
+    const runTotalsRaw = form.get("runTotals");
+    if (runTotalsRaw) {
+      try {
+        const parsed = JSON.parse(String(runTotalsRaw));
+        if (parsed && typeof parsed === "object") runTotals = { ...runTotals, ...parsed };
+      } catch {
+        // ignore
+      }
+    }
+
+    try {
+      const { data: masterRows, error: masterErr, count: masterTotal } = await supabase
+        .from(MASTER_TABLE)
+        .select('"Handle","Grade"', { count: "exact" })
+        .range(offset, offset + limit - 1);
+
+      if (masterErr) throw new Error(masterErr.message);
+
+      const rows = masterRows || [];
+      const batchFetched = rows.length;
+
+      // Nothing left => done. (Important: avoid throwing errors here.)
+      if (batchFetched === 0) {
+        return {
+          ok: true,
+          intent,
+          done: true,
+          summary: {
+            offset,
+            limit,
+            batchFetched: 0,
+            uniqueHandles: 0,
+            updatedHandles: 0,
+            updatedRows: 0,
+            insertedProducts: 0,
+            insertedRows: 0,
+            missingInShopify: 0,
+            masterTotal: typeof masterTotal === "number" ? masterTotal : null,
+            nextOffset: offset,
+            hasMore: false,
+          },
+          runTotals: { ...runTotals },
+        };
+      }
+
+      // unique handle => grade (prefer non-empty grade)
+      const handleToGrade = new Map();
+      for (const r of rows) {
+        const handleRaw = cleanText(r?.Handle);
+        if (!handleRaw) continue;
+        const key = handleRaw.toLowerCase();
+        const grade = cleanText(r?.Grade);
+        if (!handleToGrade.has(key)) {
+          handleToGrade.set(key, { handleRaw, grade });
+        } else {
+          const prev = handleToGrade.get(key);
+          if ((!prev?.grade || prev.grade === "") && grade) {
+            handleToGrade.set(key, { handleRaw: prev?.handleRaw || handleRaw, grade });
+          }
+        }
+      }
+
+      const keys = Array.from(handleToGrade.keys());
+      const uniqueHandles = keys.length;
+
+      let updatedHandles = 0;
+      let updatedRows = 0;
+      let insertedProducts = 0;
+      let insertedRows = 0;
+      let missingInShopify = 0;
+
+      for (const hKey of keys) {
+        const entry = handleToGrade.get(hKey);
+        const handleRaw = entry?.handleRaw || hKey;
+        const grade = cleanText(entry?.grade);
+
+        // Does handle already exist in EXTERNAL_TABLE? (case-insensitive)
+        const { data: existing, error: existErr } = await supabase
+          .from(EXTERNAL_TABLE)
+          .select("id,size")
+          .ilike("product_handle", handleRaw);
+
+        if (existErr) throw new Error(existErr.message);
+
+        const exists = Array.isArray(existing) && existing.length > 0;
+
+        if (exists) {
+          // Merge ALL existing size arrays for this handle into a single array and write it back.
+          const mergedSizes = [];
+          for (const row of existing) {
+            const s = row?.size;
+            if (Array.isArray(s)) mergedSizes.push(...s);
+            else if (typeof s === "string" && s.trim()) mergedSizes.push(s.trim());
+          }
+          const mergedSizeArray = uniqStrings(mergedSizes);
+
+          const { data: updData, error: updErr, count } = await supabase
+            .from(EXTERNAL_TABLE)
+            .update({
+              grade: grade || null,
+              size: mergedSizeArray.length ? mergedSizeArray : null,
+              updated_at: new Date().toISOString(),
+            })
+            .ilike("product_handle", handleRaw)
+            .select("id", { count: "exact" });
+
+          if (updErr) throw new Error(updErr.message);
+
+          updatedHandles += 1;
+          if (typeof count === "number") updatedRows += count;
+          else if (Array.isArray(updData)) updatedRows += updData.length;
+          continue;
+        }
+
+        // Not in external table: fetch from Shopify; if not in Shopify, do not add.
+        const prod = await fetchProductByHandleWithCollectionsAndSizes(admin, handleRaw);
+        if (!prod?.id) {
+          missingInShopify += 1;
+          continue;
+        }
+
+        const cols = prod.collections || [];
+        if (cols.length === 0) {
+          // Nothing to insert if no collections
+          continue;
+        }
+
+        const upsertRecords = cols.map((c) => ({
+          shopify_product_id: prod.id,
+          product_title: prod.title || null,
+          product_handle: prod.handle || handleRaw || null,
+          collection_id: c.id || null,
+          collection_title: c.title || null,
+          collection_handle: c.handle || null,
+          grade: grade || null,
+          size: prod.sizes && prod.sizes.length ? prod.sizes : null,
+          updated_at: new Date().toISOString(),
+        }));
+
+        const { data: insData, error: insErr } = await supabase
+          .from(EXTERNAL_TABLE)
+          .upsert(upsertRecords, { onConflict: "shopify_product_id,collection_id" })
+          .select("id");
+
+        if (insErr) throw new Error(insErr.message);
+
+        insertedProducts += 1;
+        if (Array.isArray(insData)) insertedRows += insData.length;
+        else insertedRows += upsertRecords.length;
+      }
+
+      const nextOffset = offset + limit;
+      const total = typeof masterTotal === "number" ? masterTotal : null;
+      const hasMore = total == null ? true : nextOffset < total;
+
+      // Update totals on the server (so UI can show ONLY final totals)
+      const newTotals = {
+        batches: (runTotals.batches || 0) + 1,
+        uniqueHandles: (runTotals.uniqueHandles || 0) + (uniqueHandles || 0),
+        updatedHandles: (runTotals.updatedHandles || 0) + (updatedHandles || 0),
+        updatedRows: (runTotals.updatedRows || 0) + (updatedRows || 0),
+        insertedProducts: (runTotals.insertedProducts || 0) + (insertedProducts || 0),
+        insertedRows: (runTotals.insertedRows || 0) + (insertedRows || 0),
+        missingInShopify: (runTotals.missingInShopify || 0) + (missingInShopify || 0),
+      };
+
+      return {
+        ok: true,
+        intent,
+        done: !hasMore,
+        summary: {
+          offset,
+          limit,
+          batchFetched,
+          uniqueHandles,
+          updatedHandles,
+          updatedRows,
+          insertedProducts,
+          insertedRows,
+          missingInShopify,
+          masterTotal: total,
+          nextOffset,
+          hasMore,
+        },
+        runTotals: newTotals,
+      };
+    } catch (e) {
+      return { ok: false, intent, error: safeErrToString(e) };
+    }
+  }
 
   // delete only one collection row from external DB
   if (intent === "deleteCollection") {
@@ -353,10 +630,11 @@ export const action = async ({ request }) => {
 
       return { ok: true, intent, productId, collectionId };
     } catch (e) {
-      return { ok: false, error: e?.message || "Delete failed" };
+      return { ok: false, error: safeErrToString(e) };
     }
   }
 
+  // saveRow (manual edits)
   if (intent !== "saveRow") return { ok: false, error: "Unknown intent" };
 
   const productId = cleanText(form.get("productId"));
@@ -366,7 +644,6 @@ export const action = async ({ request }) => {
 
   if (!productId) return { ok: false, error: "Missing productId" };
 
-  // Only persist changes to external DB (Supabase). Do NOT modify Shopify admin.
   try {
     const parseArr = (k) => {
       const v = form.get(k);
@@ -374,7 +651,7 @@ export const action = async ({ request }) => {
       try {
         const parsed = JSON.parse(v);
         return Array.isArray(parsed) ? parsed : null;
-      } catch (e) {
+      } catch {
         return null;
       }
     };
@@ -383,19 +660,17 @@ export const action = async ({ request }) => {
     const sizeRangeVal = form.get("size_range") || null;
     const sizeTypeVal = form.get("size_type") || null;
 
-    // Parse collection-grade pairs
     let collectionGradesList = [];
     if (collectionGradesJson) {
       try {
         collectionGradesList = JSON.parse(collectionGradesJson);
         if (!Array.isArray(collectionGradesList)) collectionGradesList = [];
-      } catch (e) {
+      } catch {
         collectionGradesList = [];
       }
     }
 
-    // Ensure collection handle (and title when possible) exists for each collection item.
-    // If a saved item is missing the `handle`, fetch it from Shopify by collection ID.
+    // Ensure collection handle exists for each item
     for (let i = 0; i < collectionGradesList.length; i++) {
       const item = collectionGradesList[i] || {};
       const hasId = item.id && String(item.id).trim() !== "";
@@ -417,7 +692,8 @@ export const action = async ({ request }) => {
           const node = json?.data?.node;
           if (node) {
             collectionGradesList[i].handle = node.handle || collectionGradesList[i].handle || "";
-            collectionGradesList[i].title = collectionGradesList[i].title || node.title || collectionGradesList[i].title || "";
+            collectionGradesList[i].title =
+              collectionGradesList[i].title || node.title || collectionGradesList[i].title || "";
           }
         } catch (err) {
           console.error("Failed to fetch collection handle for", item.id, err);
@@ -445,7 +721,6 @@ export const action = async ({ request }) => {
       const { error: upErr } = await supabase
         .from(EXTERNAL_TABLE)
         .upsert(upsertRecords, { onConflict: "shopify_product_id,collection_id" });
-
       if (upErr) throw new Error(upErr.message);
     } else {
       const { error: delErr } = await supabase.from(EXTERNAL_TABLE).delete().eq("shopify_product_id", productId);
@@ -454,63 +729,163 @@ export const action = async ({ request }) => {
 
     return { ok: true, productId };
   } catch (e) {
-    return { ok: false, error: e?.message || "Save failed" };
+    return { ok: false, error: safeErrToString(e) };
   }
 };
 
 /* ---------------- UI ---------------- */
 
 export default function GradeCollectionPage() {
-  const { shop, products, collections, hasNextPage, endCursor, after } = useLoaderData();
-  const shopify = useAppBridge();
+  const { shop, products, collections, hasNextPage, endCursor, after, masterTotal } = useLoaderData();
+  useAppBridge(); // keep bridge ready
 
   const fetcher = useFetcher(); // saveRow
   const deleteFetcher = useFetcher(); // deleteCollection
+  const syncFetcher = useFetcher(); // syncGradesBatch
 
   const [collectionGradeByProductId, setCollectionGradeByProductId] = useState({});
   const [addingCollectionFor, setAddingCollectionFor] = useState(null);
-  // Draft row while adding a new collection (so dropdown + grade show together)
   const [addDraftByProductId, setAddDraftByProductId] = useState({});
+
+  // auto-sync controls
+  const [syncOffset, setSyncOffset] = useState(0);
+  const [autoSyncOn, setAutoSyncOn] = useState(false);
+  const syncLimit = 50;
+
+  // Only show FINAL report when done
+  const [finalReport, setFinalReport] = useState(null);
+
+  // run totals (kept in memory; updated from server response each batch)
+  const [syncTotals, setSyncTotals] = useState({
+    batches: 0,
+    uniqueHandles: 0,
+    updatedHandles: 0,
+    updatedRows: 0,
+    insertedProducts: 0,
+    insertedRows: 0,
+    missingInShopify: 0,
+  });
+
+  const lastBatchIdRef = useRef(0);
+  const latestRunTotalsRef = useRef(syncTotals);
+
+  // Persist offset
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem("master_sync_offset");
+      const n = Number.parseInt(raw || "0", 10);
+      if (Number.isFinite(n) && n >= 0) setSyncOffset(n);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("master_sync_offset", String(syncOffset));
+    } catch {
+      // ignore
+    }
+  }, [syncOffset]);
 
   const isSaving = fetcher.state !== "idle";
   const isDeleting = deleteFetcher.state !== "idle";
+  const isSyncing = syncFetcher.state !== "idle";
 
   const saveError = fetcher.data?.ok === false ? fetcher.data.error : null;
   const deleteError = deleteFetcher.data?.ok === false ? deleteFetcher.data.error : null;
 
-  const ALLOWED_COLLECTION_GIDS = useMemo(
-    () =>
-      new Set([
-        "gid://shopify/Collection/276875509831",
-        "gid://shopify/Collection/276875247687",
-        "gid://shopify/Collection/276039368775",
-        "gid://shopify/Collection/276875411527",
-        "gid://shopify/Collection/276875444295",
-        "gid://shopify/Collection/276875280455",
-        "gid://shopify/Collection/282935689287",
-      ]),
-    []
-  );
+  const syncError =
+    syncFetcher.data?.intent === "syncGradesBatch" && syncFetcher.data?.ok === false ? syncFetcher.data.error : null;
 
-  const allowedCollections = useMemo(() => {
-    return (collections || []).filter((c) => ALLOWED_COLLECTION_GIDS.has(String(c.id)));
-  }, [collections, ALLOWED_COLLECTION_GIDS]);
+  const syncSummary =
+    syncFetcher.data?.intent === "syncGradesBatch" && syncFetcher.data?.ok === true ? syncFetcher.data.summary : null;
+
+  const syncRunTotals =
+    syncFetcher.data?.intent === "syncGradesBatch" && syncFetcher.data?.ok === true ? syncFetcher.data.runTotals : null;
+
+  const syncDone =
+    syncFetcher.data?.intent === "syncGradesBatch" && syncFetcher.data?.ok === true ? !!syncFetcher.data.done : false;
+
+  // Keep totals updated from server response (no per-batch UI rendering)
+  useEffect(() => {
+    if (!syncSummary) return;
+
+    // update offset from server (authoritative)
+    if (typeof syncSummary.nextOffset === "number") {
+      setSyncOffset(syncSummary.nextOffset);
+    }
+
+    // prevent double processing
+    const batchId = (syncSummary.offset ?? 0) + (syncSummary.limit ?? 0);
+    if (batchId === lastBatchIdRef.current) return;
+    lastBatchIdRef.current = batchId;
+
+    if (syncRunTotals) {
+      const nextTotals = {
+        batches: Number(syncRunTotals.batches || 0),
+        uniqueHandles: Number(syncRunTotals.uniqueHandles || 0),
+        updatedHandles: Number(syncRunTotals.updatedHandles || 0),
+        updatedRows: Number(syncRunTotals.updatedRows || 0),
+        insertedProducts: Number(syncRunTotals.insertedProducts || 0),
+        insertedRows: Number(syncRunTotals.insertedRows || 0),
+        missingInShopify: Number(syncRunTotals.missingInShopify || 0),
+      };
+      setSyncTotals(nextTotals);
+      latestRunTotalsRef.current = nextTotals;
+    }
+
+    // If done, show ONLY final report
+    if (syncDone) {
+      setAutoSyncOn(false);
+      setFinalReport({
+        totals: syncRunTotals || latestRunTotalsRef.current,
+        completedAt: new Date().toISOString(),
+      });
+    }
+  }, [syncSummary, syncRunTotals, syncDone]);
+
+  // Auto-chain batches (STOP button will set autoSyncOn=false, so it stops after current batch)
+  useEffect(() => {
+    if (!autoSyncOn) return;
+    if (isSyncing) return;
+    if (!syncSummary) return;
+
+    if (syncSummary.hasMore) {
+      syncFetcher.submit(
+        {
+          intent: "syncGradesBatch",
+          offset: String(syncSummary.nextOffset),
+          limit: String(syncLimit),
+          runTotals: JSON.stringify(latestRunTotalsRef.current),
+        },
+        { method: "POST" }
+      );
+    } else {
+      setAutoSyncOn(false);
+      setFinalReport({
+        totals: latestRunTotalsRef.current,
+        completedAt: new Date().toISOString(),
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSyncOn, isSyncing, syncSummary]);
 
   const collectionOptions = useMemo(() => {
-    return [{ label: "No collection", value: "" }, ...allowedCollections.map((c) => ({ label: c.title, value: c.id }))];
-  }, [allowedCollections]);
+    return [{ label: "No collection", value: "" }, ...(collections || []).map((c) => ({ label: c.title, value: c.id }))];
+  }, [collections]);
 
   const gidToTitle = useMemo(() => {
     const m = new Map();
-    for (const c of allowedCollections) m.set(String(c.id), String(c.title || ""));
+    for (const c of collections || []) m.set(String(c.id), String(c.title || ""));
     return m;
-  }, [allowedCollections]);
+  }, [collections]);
 
   const gidToHandle = useMemo(() => {
     const m = new Map();
-    for (const c of allowedCollections) m.set(String(c.id), String(c.handle || ""));
+    for (const c of collections || []) m.set(String(c.id), String(c.handle || ""));
     return m;
-  }, [allowedCollections]);
+  }, [collections]);
 
   useEffect(() => {
     const cg = {};
@@ -533,12 +908,88 @@ export default function GradeCollectionPage() {
     setCollectionGradeByProductId(cg);
   }, [products]);
 
-  const saveRow = (p) => {
-    // Existing rows
-    const collectionsData = [...(collectionGradeByProductId[p.id] || [])];
+  const headings = useMemo(() => [{ title: "Product" }, { title: "Collections and grade" }, { title: "Action" }], []);
 
-    // If user is in "adding" mode and has picked a collection, include it in the saved payload.
+  // progress
+  const totalForUI = syncSummary?.masterTotal ?? masterTotal;
+  const syncedSoFar = Math.min(syncOffset, typeof totalForUI === "number" ? totalForUI : syncOffset);
+  const progressPct =
+    typeof totalForUI === "number" && totalForUI > 0 ? Math.min(100, Math.round((syncedSoFar / totalForUI) * 100)) : 0;
+
+  const alreadyComplete = typeof totalForUI === "number" && totalForUI > 0 && syncOffset >= totalForUI;
+
+  const startAutoSync = () => {
+    // Workaround: if progress is already full, do not call action (prevents the weird {" error state)
+    if (alreadyComplete) {
+      setAutoSyncOn(false);
+      setFinalReport({
+        totals: latestRunTotalsRef.current,
+        completedAt: new Date().toISOString(),
+        note: "Already completed (offset is at the end). Reset offset if you want to re-run.",
+      });
+      return;
+    }
+
+    setFinalReport(null);
+
+    // reset run totals for THIS run (optional). If you want totals to continue across runs, remove this block.
+    const freshTotals = {
+      batches: 0,
+      uniqueHandles: 0,
+      updatedHandles: 0,
+      updatedRows: 0,
+      insertedProducts: 0,
+      insertedRows: 0,
+      missingInShopify: 0,
+    };
+    setSyncTotals(freshTotals);
+    latestRunTotalsRef.current = freshTotals;
+    lastBatchIdRef.current = 0;
+
+    setAutoSyncOn(true);
+    syncFetcher.submit(
+      {
+        intent: "syncGradesBatch",
+        offset: String(syncOffset),
+        limit: String(syncLimit),
+        runTotals: JSON.stringify(freshTotals),
+      },
+      { method: "POST" }
+    );
+  };
+
+  const stopAutoSync = () => {
+    setAutoSyncOn(false);
+    // No need to "cancel" fetcher request (not supported reliably). This stops chaining after current batch finishes.
+  };
+
+  const resetSync = () => {
+    setAutoSyncOn(false);
+    setSyncOffset(0);
+    setFinalReport(null);
+    const freshTotals = {
+      batches: 0,
+      uniqueHandles: 0,
+      updatedHandles: 0,
+      updatedRows: 0,
+      insertedProducts: 0,
+      insertedRows: 0,
+      missingInShopify: 0,
+    };
+    setSyncTotals(freshTotals);
+    latestRunTotalsRef.current = freshTotals;
+    lastBatchIdRef.current = 0;
+    try {
+      window.localStorage.setItem("master_sync_offset", "0");
+    } catch {
+      // ignore
+    }
+  };
+
+  const saveRow = (p) => {
+    const collectionsData = [...(collectionGradeByProductId[p.id] || [])];
     const draft = addDraftByProductId[p.id];
+
     if (draft && draft.collectionId) {
       const alreadyExists = collectionsData.some((c) => c.id === draft.collectionId);
       if (!alreadyExists) {
@@ -553,7 +1004,6 @@ export default function GradeCollectionPage() {
       }
     }
 
-    // Close adding UI after Save click (does not change backend behavior)
     setAddingCollectionFor(null);
     setAddDraftByProductId((prev) => {
       const next = { ...prev };
@@ -577,30 +1027,25 @@ export default function GradeCollectionPage() {
   };
 
   const deleteOneCollection = (productId, collectionId, colIdx) => {
-    // 1) remove from UI immediately
     setCollectionGradeByProductId((prev) => {
       const existing = prev[productId] || [];
-      return {
-        ...prev,
-        [productId]: existing.filter((_, i) => i !== colIdx),
-      };
+      return { ...prev, [productId]: existing.filter((_, i) => i !== colIdx) };
     });
 
-    // 2) delete from external DB immediately
-    deleteFetcher.submit(
-      {
-        intent: "deleteCollection",
-        productId,
-        collectionId,
-      },
-      { method: "POST" }
-    );
+    deleteFetcher.submit({ intent: "deleteCollection", productId, collectionId }, { method: "POST" });
   };
 
-  const headings = useMemo(
-    () => [{ title: "Product" }, { title: "Collections and grade" }, { title: "Action" }],
-    []
-  );
+  const savingThisRow = (pid) => isSaving && fetcher.formData?.get("productId") === pid;
+
+  const renderErrorText = (v) => {
+    if (!v) return "";
+    if (typeof v === "string") return v;
+    try {
+      return JSON.stringify(v);
+    } catch {
+      return String(v);
+    }
+  };
 
   return (
     <Page title="Grade and Collection">
@@ -608,13 +1053,34 @@ export default function GradeCollectionPage() {
         <Layout.Section>
           {saveError && (
             <Banner tone="critical" title="Save error">
-              <p>{saveError}</p>
+              <p>{renderErrorText(saveError)}</p>
             </Banner>
           )}
 
           {deleteError && (
             <Banner tone="critical" title="Delete error">
-              <p>{deleteError}</p>
+              <p>{renderErrorText(deleteError)}</p>
+            </Banner>
+          )}
+
+          {syncError && (
+            <Banner tone="critical" title="Sync error">
+              <p>{renderErrorText(syncError)}</p>
+            </Banner>
+          )}
+
+          {finalReport && (
+            <Banner tone="success" title="Sync completed (final report)">
+              {finalReport.note ? <p>{finalReport.note}</p> : null}
+              <p>
+                Unique handles: {finalReport.totals?.uniqueHandles || 0} |
+                Updated handles: {finalReport.totals?.updatedHandles || 0} | Updated rows:{" "}
+                {finalReport.totals?.updatedRows || 0}
+              </p>
+              <p>
+                Not in Shopify:{" "}
+                {finalReport.totals?.missingInShopify || 0}
+              </p>
             </Banner>
           )}
 
@@ -625,10 +1091,67 @@ export default function GradeCollectionPage() {
                   <Text as="h2" variant="headingMd">
                     Products
                   </Text>
-                  <Text as="span" tone="subdued">
-                    Store: {shop}
-                  </Text>
+
+                  <InlineStack gap="200" blockAlign="center">
+                    <Button
+                      variant="primary"
+                      loading={autoSyncOn && isSyncing}
+                      disabled={isSaving || isDeleting || autoSyncOn || alreadyComplete}
+                      onClick={startAutoSync}
+                    >
+                      Sync all (50 x batches)
+                    </Button>
+
+                    {autoSyncOn ? (
+                      <Button tone="critical" disabled={isSaving || isDeleting} onClick={stopAutoSync}>
+                        Stop
+                      </Button>
+                    ) : null}
+
+                    <Button
+                      disabled={isSaving || isDeleting || isSyncing || autoSyncOn || alreadyComplete}
+                      onClick={() =>
+                        syncFetcher.submit(
+                          {
+                            intent: "syncGradesBatch",
+                            offset: String(syncOffset),
+                            limit: String(syncLimit),
+                            runTotals: JSON.stringify(latestRunTotalsRef.current),
+                          },
+                          { method: "POST" }
+                        )
+                      }
+                    >
+                      Sync next {syncLimit}
+                    </Button>
+                  </InlineStack>
                 </InlineStack>
+
+                <Card sectioned>
+                  <BlockStack gap="200">
+                    <InlineStack align="space-between">
+
+                      <Text as="span" tone="subdued">
+                        {typeof totalForUI === "number" ? `${syncedSoFar} / ${totalForUI}` : `${syncedSoFar} / ?`}
+                      </Text>
+                    </InlineStack>
+
+                    <ProgressBar progress={progressPct} />
+
+                    <InlineStack align="space-between">
+
+                      <Button size="slim" disabled={isSyncing} onClick={resetSync}>
+                        Reset offset
+                      </Button>
+                    </InlineStack>
+
+                    {alreadyComplete ? (
+                      <Text as="span" tone="subdued" variant="bodySm">
+                        Sync is already complete. If you want to run again, click Reset offset.
+                      </Text>
+                    ) : null}
+                  </BlockStack>
+                </Card>
 
                 <IndexTable
                   resourceName={{ singular: "product", plural: "products" }}
@@ -638,7 +1161,6 @@ export default function GradeCollectionPage() {
                 >
                   {products.map((p, idx) => {
                     const currentCollectionGrades = collectionGradeByProductId[p.id] || [];
-
                     const originalCollectionGrades =
                       p.savedCollections && p.savedCollections.length > 0
                         ? p.savedCollections
@@ -653,10 +1175,7 @@ export default function GradeCollectionPage() {
                           ]
                           : [];
 
-                    const changed =
-                      JSON.stringify(currentCollectionGrades) !== JSON.stringify(originalCollectionGrades);
-
-                    const savingThisRow = isSaving && fetcher.formData?.get("productId") === p.id;
+                    const changed = JSON.stringify(currentCollectionGrades) !== JSON.stringify(originalCollectionGrades);
 
                     return (
                       <IndexTable.Row id={p.id} key={p.id} position={idx}>
@@ -677,7 +1196,6 @@ export default function GradeCollectionPage() {
                           </InlineStack>
                         </IndexTable.Cell>
 
-                        {/* Collection + Grade (same line) + Trash per row */}
                         <IndexTable.Cell>
                           <BlockStack gap="150">
                             {(collectionGradeByProductId[p.id] || []).map((collItem, colIdx) => {
@@ -687,12 +1205,17 @@ export default function GradeCollectionPage() {
                                 deleteFetcher.formData?.get("collectionId") === collItem.id;
 
                               return (
-                                <InlineStack key={`${p.id}-collgrade-${colIdx}`} gap="200" blockAlign="center" wrap={false}>
-                                  <div style={{ width: 120, textOverflow: "ellipsis", whiteSpace: "normal" }}>
+                                <InlineStack
+                                  key={`${p.id}-collgrade-${colIdx}`}
+                                  gap="200"
+                                  blockAlign="center"
+                                  wrap={false}
+                                >
+                                  <div style={{ width: 160, textOverflow: "ellipsis", whiteSpace: "normal" }}>
                                     <Badge tone="info">{collItem.title}</Badge>
                                   </div>
 
-                                  <div style={{ width: 120 }}>
+                                  <div style={{ width: 140 }}>
                                     <TextField
                                       label="Grade"
                                       labelHidden
@@ -702,10 +1225,7 @@ export default function GradeCollectionPage() {
                                           const existing = prev[p.id] || [];
                                           const updated = [...existing];
                                           updated[colIdx] = { ...updated[colIdx], grade: v };
-                                          return {
-                                            ...prev,
-                                            [p.id]: updated,
-                                          };
+                                          return { ...prev, [p.id]: updated };
                                         });
                                       }}
                                       autoComplete="off"
@@ -718,7 +1238,7 @@ export default function GradeCollectionPage() {
                                     icon={DeleteIcon}
                                     tone="critical"
                                     loading={deletingThis}
-                                    disabled={savingThisRow}
+                                    disabled={savingThisRow(p.id)}
                                     accessibilityLabel={`Remove ${collItem.title}`}
                                     onClick={() => deleteOneCollection(p.id, collItem.id, colIdx)}
                                   />
@@ -728,7 +1248,7 @@ export default function GradeCollectionPage() {
 
                             {addingCollectionFor === p.id ? (
                               <InlineStack gap="200" blockAlign="center" wrap={false}>
-                                <div style={{ minWidth: 180 }}>
+                                <div style={{ minWidth: 220 }}>
                                   <Select
                                     options={collectionOptions.filter(
                                       (opt) =>
@@ -737,11 +1257,10 @@ export default function GradeCollectionPage() {
                                     )}
                                     value={addDraftByProductId[p.id]?.collectionId || ""}
                                     onChange={(v) => {
-                                      // Auto-add the selected collection into the list immediately
                                       if (!v) return;
-
                                       const title = gidToTitle.get(String(v)) || "";
                                       const handle = gidToHandle.get(String(v)) || "";
+
                                       setCollectionGradeByProductId((prev) => {
                                         const existing = prev[p.id] || [];
                                         if (existing.some((c) => c.id === v)) return prev;
@@ -759,7 +1278,6 @@ export default function GradeCollectionPage() {
                                         };
                                       });
 
-                                      // Close the add row; user will type grade in the newly added row
                                       setAddingCollectionFor(null);
                                       setAddDraftByProductId((prev) => {
                                         const next = { ...prev };
@@ -770,7 +1288,7 @@ export default function GradeCollectionPage() {
                                   />
                                 </div>
 
-                                <div style={{ width: 120 }}>
+                                <div style={{ width: 140 }}>
                                   <TextField
                                     label="Grade"
                                     labelHidden
@@ -804,14 +1322,13 @@ export default function GradeCollectionPage() {
                               </InlineStack>
                             ) : (
                               <InlineStack gap="200" blockAlign="center" wrap={false}>
-                                <div style={{ minWidth: 180 }} />
+                                <div style={{ minWidth: 220 }} />
                                 <div style={{ minWidth: 220 }} />
                               </InlineStack>
                             )}
                           </BlockStack>
                         </IndexTable.Cell>
 
-                        {/* Save column (ONLY Save button) */}
                         <IndexTable.Cell>
                           <div
                             style={{
@@ -822,19 +1339,22 @@ export default function GradeCollectionPage() {
                               gap: "12px",
                             }}
                           >
-                            {/* Add button (left) */}
                             {addingCollectionFor !== p.id ? (
-                              <Button variant="primary" tone="success" size="slim" onClick={() => setAddingCollectionFor(p.id)}>
+                              <Button
+                                variant="primary"
+                                tone="success"
+                                size="slim"
+                                onClick={() => setAddingCollectionFor(p.id)}
+                              >
                                 +
                               </Button>
                             ) : (
                               <div />
                             )}
 
-                            {/* Save button (right) */}
                             <Button
                               variant="primary"
-                              loading={savingThisRow}
+                              loading={savingThisRow(p.id)}
                               disabled={!changed}
                               onClick={() => saveRow(p)}
                             >
