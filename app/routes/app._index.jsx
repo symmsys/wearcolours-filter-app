@@ -769,6 +769,9 @@ export default function GradeCollectionPage() {
   const lastBatchIdRef = useRef(0);
   const latestRunTotalsRef = useRef(syncTotals);
 
+  // Progress animation (smooth percent count-up)
+  const [displayPct, setDisplayPct] = useState(0);
+
   // Persist offset
   useEffect(() => {
     try {
@@ -912,9 +915,33 @@ export default function GradeCollectionPage() {
 
   // progress
   const totalForUI = syncSummary?.masterTotal ?? masterTotal;
-  const syncedSoFar = Math.min(syncOffset, typeof totalForUI === "number" ? totalForUI : syncOffset);
+
+  // completed rows: use server nextOffset when available
+  const completed = typeof syncSummary?.nextOffset === "number" ? syncSummary.nextOffset : syncOffset;
+
+  const syncedSoFar = Math.min(completed, typeof totalForUI === "number" ? totalForUI : completed);
   const progressPct =
     typeof totalForUI === "number" && totalForUI > 0 ? Math.min(100, Math.round((syncedSoFar / totalForUI) * 100)) : 0;
+
+  // smooth % counter animation
+  useEffect(() => {
+    let raf = 0;
+    const start = displayPct;
+    const end = progressPct;
+    const duration = 350;
+    const t0 = performance.now();
+
+    const step = (t) => {
+      const p = Math.min(1, (t - t0) / duration);
+      const next = Math.round(start + (end - start) * p);
+      setDisplayPct(next);
+      if (p < 1) raf = requestAnimationFrame(step);
+    };
+
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [progressPct]);
 
   const alreadyComplete = typeof totalForUI === "number" && totalForUI > 0 && syncOffset >= totalForUI;
 
@@ -979,6 +1006,7 @@ export default function GradeCollectionPage() {
     setSyncTotals(freshTotals);
     latestRunTotalsRef.current = freshTotals;
     lastBatchIdRef.current = 0;
+    setDisplayPct(0);
     try {
       window.localStorage.setItem("master_sync_offset", "0");
     } catch {
@@ -1073,14 +1101,10 @@ export default function GradeCollectionPage() {
             <Banner tone="success" title="Sync completed (final report)">
               {finalReport.note ? <p>{finalReport.note}</p> : null}
               <p>
-                Unique handles: {finalReport.totals?.uniqueHandles || 0} |
-                Updated handles: {finalReport.totals?.updatedHandles || 0} | Updated rows:{" "}
-                {finalReport.totals?.updatedRows || 0}
+                Unique handles: {finalReport.totals?.uniqueHandles || 0} | Updated handles:{" "}
+                {finalReport.totals?.updatedHandles || 0} | Updated rows: {finalReport.totals?.updatedRows || 0}
               </p>
-              <p>
-                Not in Shopify:{" "}
-                {finalReport.totals?.missingInShopify || 0}
-              </p>
+              <p>Not in Shopify: {finalReport.totals?.missingInShopify || 0}</p>
             </Banner>
           )}
 
@@ -1127,29 +1151,121 @@ export default function GradeCollectionPage() {
                   </InlineStack>
                 </InlineStack>
 
+                {/* PROGRESS CARD (wave fill) */}
                 <Card sectioned>
-                  <BlockStack gap="200">
+                  <BlockStack gap="300">
+                    {/* Top numbers row */}
                     <InlineStack align="space-between">
+                      <Text as="span" tone="subdued">
+                        {typeof totalForUI === "number"
+                          ? `${syncedSoFar} / ${totalForUI}`
+                          : `${syncedSoFar} / ?`}
+                      </Text>
 
                       <Text as="span" tone="subdued">
-                        {typeof totalForUI === "number" ? `${syncedSoFar} / ${totalForUI}` : `${syncedSoFar} / ?`}
+                        {isSyncing ? "Syncing..." : alreadyComplete ? "Completed" : ""}
                       </Text>
                     </InlineStack>
 
-                    <ProgressBar progress={progressPct} />
+                    {/* Wave Progress Bar */}
+                    <div
+                      className="waveProgress"
+                      aria-label="Sync progress"
+                      role="progressbar"
+                      aria-valuenow={displayPct}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                    >
+                      {/* Fill width animates with progress */}
+                      <div className="waveProgress__fill" style={{ width: `${displayPct}%` }}>
+                        {/* The moving wave layer */}
+                        <div className="waveProgress__wave" />
+                      </div>
 
+                      {/* Percentage text (BLACK) */}
+                      <div className="waveProgress__label">{displayPct}%</div>
+                    </div>
+
+                    {/* Reset button */}
                     <InlineStack align="space-between">
-
                       <Button size="slim" disabled={isSyncing} onClick={resetSync}>
                         Reset offset
                       </Button>
                     </InlineStack>
 
+                    {/* Completed message */}
                     {alreadyComplete ? (
                       <Text as="span" tone="subdued" variant="bodySm">
-                        Sync is already complete. If you want to run again, click Reset offset.
+                        Sync is already complete. Click Reset offset to run again.
                       </Text>
                     ) : null}
+
+                    {/* Styles for wave */}
+                    <style>{`
+      .waveProgress{
+        position: relative;
+        height: 16px;
+        border-radius: 999px;
+        background: #e5e7eb;
+        overflow: hidden;
+      }
+
+      .waveProgress__fill{
+        position: absolute;
+        left: 0;
+        top: 0;
+        height: 100%;
+        border-radius: 999px;
+        overflow: hidden;
+
+        /* smooth fill animation */
+        transition: width 520ms ease;
+        will-change: width;
+
+        /* base fill color (behind wave) */
+        background: #2c6ecb;
+      }
+
+      .waveProgress__wave{
+        position: absolute;
+        inset: 0;
+
+        /* "wave hitting" effect: moving highlights */
+        background-image:
+          radial-gradient(circle at 20px 8px, rgba(255,255,255,0.35) 0 8px, transparent 9px),
+          radial-gradient(circle at 60px 14px, rgba(255,255,255,0.25) 0 7px, transparent 8px),
+          radial-gradient(circle at 100px 6px, rgba(255,255,255,0.30) 0 9px, transparent 10px),
+          radial-gradient(circle at 140px 12px, rgba(255,255,255,0.22) 0 7px, transparent 8px);
+
+        background-size: 160px 16px;
+        background-repeat: repeat-x;
+
+        /* wave motion */
+        animation: waveMove 1.1s linear infinite;
+
+        /* makes it feel like waves keep "hitting" */
+        opacity: 0.95;
+        filter: blur(0.2px);
+      }
+
+      @keyframes waveMove{
+        from { background-position: 0 0; }
+        to   { background-position: 160px 0; }
+      }
+
+      .waveProgress__label{
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+
+        font-size: 12px;
+        font-weight: 700;
+        color: #000; /* black text as requested */
+      }
+    `}</style>
                   </BlockStack>
                 </Card>
 
@@ -1340,24 +1456,14 @@ export default function GradeCollectionPage() {
                             }}
                           >
                             {addingCollectionFor !== p.id ? (
-                              <Button
-                                variant="primary"
-                                tone="success"
-                                size="slim"
-                                onClick={() => setAddingCollectionFor(p.id)}
-                              >
+                              <Button variant="primary" tone="success" size="slim" onClick={() => setAddingCollectionFor(p.id)}>
                                 +
                               </Button>
                             ) : (
                               <div />
                             )}
 
-                            <Button
-                              variant="primary"
-                              loading={savingThisRow(p.id)}
-                              disabled={!changed}
-                              onClick={() => saveRow(p)}
-                            >
+                            <Button variant="primary" loading={savingThisRow(p.id)} disabled={!changed} onClick={() => saveRow(p)}>
                               Save
                             </Button>
                           </div>
