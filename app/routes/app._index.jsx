@@ -801,6 +801,9 @@ export default function GradeCollectionPage() {
   const syncError =
     syncFetcher.data?.intent === "syncGradesBatch" && syncFetcher.data?.ok === false ? syncFetcher.data.error : null;
 
+  // additional error state for stalled auto-sync runs
+  const [syncAllError, setSyncAllError] = useState(null);
+
   const syncSummary =
     syncFetcher.data?.intent === "syncGradesBatch" && syncFetcher.data?.ok === true ? syncFetcher.data.summary : null;
 
@@ -847,6 +850,19 @@ export default function GradeCollectionPage() {
       });
     }
   }, [syncSummary, syncRunTotals, syncDone]);
+
+  // detect if auto-sync stops unexpectedly (no response/data)
+  useEffect(() => {
+    if (!autoSyncOn) {
+      setSyncAllError(null);
+      return;
+    }
+    // if fetcher is idle but we haven't received data and not currently syncing
+    if (syncFetcher.state === "idle" && syncFetcher.data == null && !isSyncing) {
+      setSyncAllError("Sync stopped unexpectedly. Please check your network or try again.");
+      setAutoSyncOn(false);
+    }
+  }, [autoSyncOn, syncFetcher.state, syncFetcher.data, isSyncing]);
 
   // Auto-chain batches (STOP button will set autoSyncOn=false, so it stops after current batch)
   useEffect(() => {
@@ -1097,6 +1113,12 @@ export default function GradeCollectionPage() {
             </Banner>
           )}
 
+          {syncAllError && (
+            <Banner tone="critical" title="Sync halted">
+              <p>{renderErrorText(syncAllError)}</p>
+            </Banner>
+          )}
+
           {finalReport && (
             <Banner tone="success" title="Sync completed (final report)">
               {finalReport.note ? <p>{finalReport.note}</p> : null}
@@ -1119,7 +1141,7 @@ export default function GradeCollectionPage() {
                   <InlineStack gap="200" blockAlign="center">
                     <Button
                       variant="primary"
-                      loading={autoSyncOn && isSyncing}
+                      loading={autoSyncOn}
                       disabled={isSaving || isDeleting || autoSyncOn || alreadyComplete}
                       onClick={startAutoSync}
                     >
@@ -1163,7 +1185,7 @@ export default function GradeCollectionPage() {
                       </Text>
 
                       <Text as="span" tone="subdued">
-                        {isSyncing ? "Syncing..." : alreadyComplete ? "Completed" : ""}
+                        {alreadyComplete ? "Completed" : ""}
                       </Text>
                     </InlineStack>
 
@@ -1188,7 +1210,7 @@ export default function GradeCollectionPage() {
 
                     {/* Reset button */}
                     <InlineStack align="space-between">
-                      <Button size="slim" disabled={isSyncing} onClick={resetSync}>
+                      <Button size="slim" disabled={isSyncing || !alreadyComplete} onClick={resetSync}>
                         Reset offset
                       </Button>
                     </InlineStack>
