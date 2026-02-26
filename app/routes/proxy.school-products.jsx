@@ -20,12 +20,6 @@ export async function loader({ request }) {
         const gradeSelected = (url.searchParams.get("grade") || "").trim();
         const productHandle = (url.searchParams.get("product_handle") || "").trim();
 
-
-        // Optional pagination for speed
-        const limit = Math.max(1, Math.min(48, Number(url.searchParams.get("limit") || 24)));
-        const page = Math.max(1, Number(url.searchParams.get("page") || 1));
-        const offset = (page - 1) * limit;
-
         if (!collectionHandle) {
             return new Response(
                 JSON.stringify({ ok: false, error: "Missing collection_handle" }),
@@ -33,14 +27,12 @@ export async function loader({ request }) {
             );
         }
 
-        // 2) Fetch mapping rows from Supabase (ONLY what we need)
         const supabase = getSupabaseAdmin();
 
         let rows = [];
         let error = null;
 
         if (productHandle) {
-            // PRODUCT MODE: fetch only this product in this collection
             const res = await supabase
                 .from("product_grade_collection")
                 .select("product_handle, grade, collection_handle")
@@ -50,7 +42,6 @@ export async function loader({ request }) {
             rows = res.data || [];
             error = res.error || null;
         } else {
-            // COLLECTION MODE: keep your current behavior
             const res = await supabase
                 .from("product_grade_collection")
                 .select("product_handle, grade, shopify_product_id, collection_id, collection_handle")
@@ -62,7 +53,6 @@ export async function loader({ request }) {
             error = res.error || null;
         }
 
-
         if (error) {
             return new Response(
                 JSON.stringify({ ok: false, error: error.message || "Supabase error" }),
@@ -72,7 +62,7 @@ export async function loader({ request }) {
 
         const safeRows = rows || [];
 
-        // PRODUCT MODE RESPONSE (does not affect collection mode)
+        // PRODUCT MODE
         if (productHandle) {
             const gradeSet = new Set();
             for (const r of safeRows) {
@@ -99,60 +89,60 @@ export async function loader({ request }) {
             );
         }
 
-
-        // 3) Build available grades for this school (for dropdown)
+        // Build available grades
         const gradeSet = new Set();
         for (const r of safeRows) {
             for (const g of splitGrades(r.grade)) gradeSet.add(g);
         }
+
         const available_grades = Array.from(gradeSet).sort();
 
-        // 4) Grade filter
+        // Grade filter
         const filteredRows = gradeSelected
             ? safeRows.filter((r) => splitGrades(r.grade).includes(gradeSelected))
             : safeRows;
 
-        // 5) Unique handles + gradeByHandle
+        // Unique handles + gradeByHandle
         const gradeByHandleSet = {};
+
         for (const r of filteredRows) {
             const h = (r.product_handle || "").trim();
             if (!h) continue;
 
             if (!gradeByHandleSet[h]) gradeByHandleSet[h] = new Set();
-            for (const g of splitGrades(r.grade)) gradeByHandleSet[h].add(g);
+            for (const g of splitGrades(r.grade)) {
+                gradeByHandleSet[h].add(g);
+            }
         }
 
-        const allHandles = Array.from(new Set(filteredRows.map((r) => (r.product_handle || "").trim()).filter(Boolean)));
+        const allHandles = Array.from(
+            new Set(
+                filteredRows
+                    .map((r) => (r.product_handle || "").trim())
+                    .filter(Boolean)
+            )
+        );
 
-        // 6) Apply pagination to handles (faster first render)
-        const pagedHandles = allHandles.slice(offset, offset + limit);
-
-        // 7) Build gradeByHandle output (only for returned handles)
         const gradeByHandle = {};
-        for (const h of pagedHandles) {
+        for (const h of allHandles) {
             const set = gradeByHandleSet[h];
             gradeByHandle[h] = set ? Array.from(set).join(",") : "all";
         }
 
-        // 8) Return ONLY mapping data (fast)
+        // Return ALL handles (no limit)
         return new Response(
             JSON.stringify({
                 ok: true,
                 collection_handle: collectionHandle,
                 grade_selected: gradeSelected || null,
-
-                page,
-                limit,
                 total_handles: allHandles.length,
-                handles: pagedHandles,
-
+                handles: allHandles,
                 available_grades,
                 gradeByHandle,
             }),
             {
                 headers: {
                     "Content-Type": "application/json; charset=utf-8",
-                    // Small cache helps a lot; adjust as needed
                     "Cache-Control": "public, max-age=30, stale-while-revalidate=300",
                 },
             }

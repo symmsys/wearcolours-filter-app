@@ -1123,7 +1123,7 @@ export default function GradeCollectionPage() {
                       disabled={isSaving || isDeleting || autoSyncOn || alreadyComplete}
                       onClick={startAutoSync}
                     >
-                      Sync all (50 x batches)
+                      Sync all
                     </Button>
 
                     {autoSyncOn ? (
