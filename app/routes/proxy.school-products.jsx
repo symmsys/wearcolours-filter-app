@@ -8,6 +8,115 @@ function splitGrades(value) {
         .filter(Boolean);
 }
 
+/**
+ * Fetch product handles in the SAME order as the collection is sorted in Shopify Admin.
+ * This is the “manual / collection default” order.
+ */
+async function fetchShopifyCollectionHandlesInOrder(admin, collectionHandle) {
+    const handles = [];
+    let cursor = null;
+    let hasNextPage = true;
+
+    // We try COLLECTION_DEFAULT first (best match for Shopify Admin manual order).
+    // If Shopify ever rejects the sortKey, we fallback to default (no sortKey).
+    const queryWithSortKey = `#graphql
+    query CollectionProducts($handle: String!, $first: Int!, $after: String) {
+      collectionByHandle(handle: $handle) {
+        id
+        products(first: $first, after: $after, sortKey: COLLECTION_DEFAULT) {
+          pageInfo { hasNextPage endCursor }
+          edges { node { handle } }
+        }
+      }
+    }
+  `;
+
+    const queryNoSortKey = `#graphql
+    query CollectionProducts($handle: String!, $first: Int!, $after: String) {
+      collectionByHandle(handle: $handle) {
+        id
+        products(first: $first, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          edges { node { handle } }
+        }
+      }
+    }
+  `;
+
+    async function runQuery(query) {
+        handles.length = 0;
+        cursor = null;
+        hasNextPage = true;
+
+        while (hasNextPage) {
+            const resp = await admin.graphql(query, {
+                variables: { handle: collectionHandle, first: 250, after: cursor },
+            });
+
+            const json = await resp.json();
+            if (json.errors?.length) {
+                const msg = json.errors.map((e) => e.message).join(" | ");
+                throw new Error(msg);
+            }
+
+            const productsConn = json?.data?.collectionByHandle?.products;
+            if (!productsConn) return []; // collection not found / no products
+
+            for (const edge of productsConn.edges || []) {
+                const h = edge?.node?.handle;
+                if (h) handles.push(String(h).trim());
+            }
+
+            hasNextPage = !!productsConn.pageInfo?.hasNextPage;
+            cursor = productsConn.pageInfo?.endCursor || null;
+        }
+
+        return handles;
+    }
+
+    // 1) try with sortKey
+    try {
+        return await runQuery(queryWithSortKey);
+    } catch (e) {
+        // 2) fallback to default (Shopify might still return collection order by default)
+        try {
+            return await runQuery(queryNoSortKey);
+        } catch (e2) {
+            // If Shopify fails completely, return empty (caller will keep Supabase order)
+            return [];
+        }
+    }
+}
+
+/**
+ * Reorder Supabase handles to match Shopify collection order.
+ * - Keeps ONLY handles that exist in Supabase list, in Shopify order.
+ * - Appends any extra Supabase handles not found in collection at the end.
+ */
+function reorderHandlesByShopifyOrder(supabaseHandles, shopifyOrderedHandles) {
+    const supSet = new Set((supabaseHandles || []).map((h) => String(h).trim()).filter(Boolean));
+
+    const ordered = [];
+    for (const h of shopifyOrderedHandles || []) {
+        const key = String(h).trim();
+        if (supSet.has(key)) {
+            ordered.push(key);
+            supSet.delete(key);
+        }
+    }
+
+    // Append leftovers (still keep them, but after Shopify-ordered items)
+    for (const h of supabaseHandles || []) {
+        const key = String(h).trim();
+        if (supSet.has(key)) {
+            ordered.push(key);
+            supSet.delete(key);
+        }
+    }
+
+    return ordered;
+}
+
 export async function loader({ request }) {
     try {
         // 1) Verify App Proxy request
@@ -21,10 +130,10 @@ export async function loader({ request }) {
         const productHandle = (url.searchParams.get("product_handle") || "").trim();
 
         if (!collectionHandle) {
-            return new Response(
-                JSON.stringify({ ok: false, error: "Missing collection_handle" }),
-                { status: 400, headers: { "Content-Type": "application/json; charset=utf-8" } }
-            );
+            return new Response(JSON.stringify({ ok: false, error: "Missing collection_handle" }), {
+                status: 400,
+                headers: { "Content-Type": "application/json; charset=utf-8" },
+            });
         }
 
         const supabase = getSupabaseAdmin();
@@ -46,18 +155,17 @@ export async function loader({ request }) {
                 .from("product_grade_collection")
                 .select("product_handle, grade, shopify_product_id, collection_id, collection_handle")
                 .eq("collection_handle", collectionHandle)
-                .not("product_handle", "is", null)
-                .order("updated_at", { ascending: false });
+                .not("product_handle", "is", null);
 
             rows = res.data || [];
             error = res.error || null;
         }
 
         if (error) {
-            return new Response(
-                JSON.stringify({ ok: false, error: error.message || "Supabase error" }),
-                { status: 500, headers: { "Content-Type": "application/json; charset=utf-8" } }
-            );
+            return new Response(JSON.stringify({ ok: false, error: error.message || "Supabase error" }), {
+                status: 500,
+                headers: { "Content-Type": "application/json; charset=utf-8" },
+            });
         }
 
         const safeRows = rows || [];
@@ -69,7 +177,7 @@ export async function loader({ request }) {
                 for (const g of splitGrades(r.grade)) gradeSet.add(g);
             }
 
-            const grades = Array.from(gradeSet).sort();
+            const grades = Array.from(gradeSet).sort((a, b) => Number(a) - Number(b));
 
             return new Response(
                 JSON.stringify({
@@ -94,28 +202,24 @@ export async function loader({ request }) {
         for (const r of safeRows) {
             for (const g of splitGrades(r.grade)) gradeSet.add(g);
         }
+        const available_grades = Array.from(gradeSet).sort((a, b) => Number(a) - Number(b));
 
-        const available_grades = Array.from(gradeSet).sort();
-
-        // Grade filter
+        // Grade filter (keeps gradeByHandle correct)
         const filteredRows = gradeSelected
             ? safeRows.filter((r) => splitGrades(r.grade).includes(gradeSelected))
             : safeRows;
 
         // Unique handles + gradeByHandle
         const gradeByHandleSet = {};
-
         for (const r of filteredRows) {
             const h = (r.product_handle || "").trim();
             if (!h) continue;
 
             if (!gradeByHandleSet[h]) gradeByHandleSet[h] = new Set();
-            for (const g of splitGrades(r.grade)) {
-                gradeByHandleSet[h].add(g);
-            }
+            for (const g of splitGrades(r.grade)) gradeByHandleSet[h].add(g);
         }
 
-        const allHandles = Array.from(
+        const supabaseHandles = Array.from(
             new Set(
                 filteredRows
                     .map((r) => (r.product_handle || "").trim())
@@ -124,19 +228,32 @@ export async function loader({ request }) {
         );
 
         const gradeByHandle = {};
-        for (const h of allHandles) {
+        for (const h of supabaseHandles) {
             const set = gradeByHandleSet[h];
-            gradeByHandle[h] = set ? Array.from(set).join(",") : "all";
+            gradeByHandle[h] = set ? Array.from(set).join(",") : "";
         }
 
-        // Return ALL handles (no limit)
+        // ✅ IMPORTANT: reorder by Shopify Admin manual order
+        // (If Shopify fails, we keep Supabase order as fallback)
+        let shopifyOrderedHandles = [];
+        try {
+            shopifyOrderedHandles = await fetchShopifyCollectionHandlesInOrder(admin, collectionHandle);
+        } catch (e) {
+            shopifyOrderedHandles = [];
+        }
+
+        const handles =
+            shopifyOrderedHandles && shopifyOrderedHandles.length
+                ? reorderHandlesByShopifyOrder(supabaseHandles, shopifyOrderedHandles)
+                : supabaseHandles;
+
         return new Response(
             JSON.stringify({
                 ok: true,
                 collection_handle: collectionHandle,
                 grade_selected: gradeSelected || null,
-                total_handles: allHandles.length,
-                handles: allHandles,
+                total_handles: handles.length,
+                handles,
                 available_grades,
                 gradeByHandle,
             }),
@@ -148,9 +265,9 @@ export async function loader({ request }) {
             }
         );
     } catch (e) {
-        return new Response(
-            JSON.stringify({ ok: false, error: e?.message || "Server error" }),
-            { status: 500, headers: { "Content-Type": "application/json; charset=utf-8" } }
-        );
+        return new Response(JSON.stringify({ ok: false, error: e?.message || "Server error" }), {
+            status: 500,
+            headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
     }
 }
