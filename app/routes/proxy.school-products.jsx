@@ -1,17 +1,67 @@
+// app/routes/apps.school-products.jsx (or your proxy route file)
+// App Proxy endpoint: /apps/school-products
+// Purpose:
+// 1) Read products + grades from Supabase (product_grade_collection)
+// 2) Read per-collection sort preference from Supabase (settings)
+// 3) Fetch Shopify collection product handles in that sort order
+// 4) Reorder Supabase handles to match Shopify order and return JSON
+
 import { authenticate } from "../shopify.server";
 import { getSupabaseAdmin } from "../supabase.server";
 
+/* ─────────────────────────────────────────────
+   Constants
+───────────────────────────────────────────── */
+const EXTERNAL_TABLE = "product_grade_collection";
 const SETTINGS_TABLE = "settings";
-const DEFAULT_SORT = "COLLECTION_DEFAULT"; // fallback if nothing stored
 
-async function getCollectionSortOrder(supabase, { shop, collectionHandle }) {
-    if (!shop || !collectionHandle) return DEFAULT_SORT;
+// Fallback: manual order set in Shopify Admin for the collection
+const DEFAULT_SORT = "COLLECTION_DEFAULT";
+
+/* ─────────────────────────────────────────────
+   Helpers
+───────────────────────────────────────────── */
+function splitGrades(value) {
+    return String(value || "")
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean);
+}
+
+/**
+ * Fetch Shopify collection id from handle (so we can query settings by shop+collection_id)
+ */
+async function fetchCollectionIdByHandle(admin, handle) {
+    const resp = await admin.graphql(
+        `#graphql
+      query($handle: String!) {
+        collectionByHandle(handle: $handle) { id handle title }
+      }
+    `,
+        { variables: { handle } }
+    );
+
+    const json = await resp.json();
+    if (json?.errors?.length) {
+        const msg = json.errors.map((e) => e.message).join(" | ");
+        throw new Error(msg);
+    }
+
+    const col = json?.data?.collectionByHandle;
+    return col?.id ? String(col.id) : "";
+}
+
+/**
+ * Read sort order from settings table using the UNIQUE KEY: (shop, collection_id)
+ */
+async function getCollectionSortOrder(supabase, { shop, collectionId }) {
+    if (!shop || !collectionId) return DEFAULT_SORT;
 
     const { data, error } = await supabase
         .from(SETTINGS_TABLE)
         .select("default_sort_order")
         .eq("shop", shop)
-        .eq("collection_handle", collectionHandle)
+        .eq("collection_id", collectionId)
         .maybeSingle();
 
     if (error) return DEFAULT_SORT;
@@ -20,39 +70,36 @@ async function getCollectionSortOrder(supabase, { shop, collectionHandle }) {
     return v || DEFAULT_SORT;
 }
 
+/**
+ * Map your settings values to Shopify Collection products sortKey + reverse
+ * Shopify sort keys supported on collection products:
+ * TITLE, PRICE, BEST_SELLING, CREATED, COLLECTION_DEFAULT
+ */
 function mapSortToShopify(sortOrder) {
     const s = String(sortOrder || "").trim();
 
-    // Manual / client set order in Admin
     if (!s || s === "COLLECTION_DEFAULT") {
         return { sortKey: "COLLECTION_DEFAULT", reverse: false };
     }
 
-    // Your settings options
     if (s === "TITLE_ASC") return { sortKey: "TITLE", reverse: false };
     if (s === "TITLE_DESC") return { sortKey: "TITLE", reverse: true };
 
     if (s === "PRICE_ASC") return { sortKey: "PRICE", reverse: false };
     if (s === "PRICE_DESC") return { sortKey: "PRICE", reverse: true };
 
-    // Shopify best-selling is already “best selling first”
     if (s === "BEST_SELLING") return { sortKey: "BEST_SELLING", reverse: false };
 
-    // CREATED: we want newest first for CREATED_DESC
     if (s === "CREATED_DESC") return { sortKey: "CREATED", reverse: true };
     if (s === "CREATED_ASC") return { sortKey: "CREATED", reverse: false };
 
     return { sortKey: "COLLECTION_DEFAULT", reverse: false };
 }
 
-function splitGrades(value) {
-    return String(value || "")
-        .split(",")
-        .map((x) => x.trim())
-        .filter(Boolean);
-}
-
-// Fetch ALL product handles in the collection, in Shopify Admin order (with pagination).
+/**
+ * Fetch product handles in Shopify order for a collection (pagination-safe).
+ * NOTE: sortKey is injected as a literal enum, reverse is variable.
+ */
 async function fetchShopifyCollectionHandles(admin, collectionHandle, { sortKey, reverse }) {
     const handles = [];
     let cursor = null;
@@ -72,11 +119,16 @@ async function fetchShopifyCollectionHandles(admin, collectionHandle, { sortKey,
 
     while (hasNextPage) {
         const resp = await admin.graphql(query, {
-            variables: { handle: collectionHandle, first: 250, after: cursor, reverse: !!reverse },
+            variables: {
+                handle: collectionHandle,
+                first: 250,
+                after: cursor,
+                reverse: !!reverse,
+            },
         });
 
         const json = await resp.json();
-        if (json.errors?.length) {
+        if (json?.errors?.length) {
             const msg = json.errors.map((e) => e.message).join(" | ");
             throw new Error(msg);
         }
@@ -97,9 +149,9 @@ async function fetchShopifyCollectionHandles(admin, collectionHandle, { sortKey,
 }
 
 /**
- * Reorder Supabase handles to match Shopify collection order.
- * - Keeps ONLY handles that exist in Supabase list, in Shopify order.
- * - Appends any extra Supabase handles not found in collection at the end.
+ * Reorder Supabase handles to match Shopify order.
+ * - Keeps only handles that exist in Supabase list, in Shopify order.
+ * - Appends any extra Supabase handles not found in the Shopify collection at the end.
  */
 function reorderHandlesByShopifyOrder(supabaseHandles, shopifyOrderedHandles) {
     const supSet = new Set((supabaseHandles || []).map((h) => String(h).trim()).filter(Boolean));
@@ -113,7 +165,7 @@ function reorderHandlesByShopifyOrder(supabaseHandles, shopifyOrderedHandles) {
         }
     }
 
-    // Append leftovers (still keep them, but after Shopify-ordered items)
+    // append leftovers
     for (const h of supabaseHandles || []) {
         const key = String(h).trim();
         if (supSet.has(key)) {
@@ -125,6 +177,9 @@ function reorderHandlesByShopifyOrder(supabaseHandles, shopifyOrderedHandles) {
     return ordered;
 }
 
+/* ─────────────────────────────────────────────
+   Proxy Loader
+───────────────────────────────────────────── */
 export async function loader({ request }) {
     try {
         // 1) Verify App Proxy request
@@ -133,6 +188,7 @@ export async function loader({ request }) {
 
         const url = new URL(request.url);
 
+        // Shopify app proxy usually includes ?shop=xxx.myshopify.com
         const shop = (url.searchParams.get("shop") || "").trim().toLowerCase();
 
         const collectionHandle = (url.searchParams.get("collection_handle") || "").trim();
@@ -148,19 +204,26 @@ export async function loader({ request }) {
 
         const supabase = getSupabaseAdmin();
 
-        const sortOrder = await getCollectionSortOrder(supabase, {
-            shop,
-            collectionHandle,
-        });
+        // 2) Resolve collectionId from Shopify (needed because settings unique key is shop+collection_id)
+        let collectionId = "";
+        try {
+            collectionId = await fetchCollectionIdByHandle(admin, collectionHandle);
+        } catch {
+            collectionId = "";
+        }
 
+        // 3) Read sort order from settings, map to Shopify sort
+        const sortOrder = await getCollectionSortOrder(supabase, { shop, collectionId });
         const sortSpec = mapSortToShopify(sortOrder);
 
+        // 4) Fetch rows from Supabase
         let rows = [];
         let error = null;
 
+        // PRODUCT MODE: return grades for a specific product inside a collection
         if (productHandle) {
             const res = await supabase
-                .from("product_grade_collection")
+                .from(EXTERNAL_TABLE)
                 .select("product_handle, grade, collection_handle")
                 .eq("collection_handle", collectionHandle)
                 .eq("product_handle", productHandle);
@@ -169,7 +232,7 @@ export async function loader({ request }) {
             error = res.error || null;
         } else {
             const res = await supabase
-                .from("product_grade_collection")
+                .from(EXTERNAL_TABLE)
                 .select("product_handle, grade, shopify_product_id, collection_id, collection_handle")
                 .eq("collection_handle", collectionHandle)
                 .not("product_handle", "is", null);
@@ -187,7 +250,7 @@ export async function loader({ request }) {
 
         const safeRows = rows || [];
 
-        // PRODUCT MODE
+        // ── PRODUCT MODE RESPONSE ──────────────────
         if (productHandle) {
             const gradeSet = new Set();
             for (const r of safeRows) {
@@ -200,7 +263,10 @@ export async function loader({ request }) {
                 JSON.stringify({
                     ok: true,
                     mode: "product",
+                    shop,
                     collection_handle: collectionHandle,
+                    collection_id: collectionId || null,
+                    sort_order: sortOrder,
                     product_handle: productHandle,
                     grades,
                     grades_csv: grades.join(","),
@@ -214,19 +280,21 @@ export async function loader({ request }) {
             );
         }
 
-        // Build available grades
+        // ── COLLECTION MODE RESPONSE ───────────────
+
+        // Available grades (full list for that collection)
         const gradeSet = new Set();
         for (const r of safeRows) {
             for (const g of splitGrades(r.grade)) gradeSet.add(g);
         }
         const available_grades = Array.from(gradeSet).sort((a, b) => Number(a) - Number(b));
 
-        // Grade filter (keeps gradeByHandle correct)
+        // Apply grade filter
         const filteredRows = gradeSelected
             ? safeRows.filter((r) => splitGrades(r.grade).includes(gradeSelected))
             : safeRows;
 
-        // Unique handles + gradeByHandle
+        // gradeByHandle based on filtered rows
         const gradeByHandleSet = {};
         for (const r of filteredRows) {
             const h = (r.product_handle || "").trim();
@@ -236,6 +304,7 @@ export async function loader({ request }) {
             for (const g of splitGrades(r.grade)) gradeByHandleSet[h].add(g);
         }
 
+        // Unique handles from filtered rows
         const supabaseHandles = Array.from(
             new Set(
                 filteredRows
@@ -250,12 +319,11 @@ export async function loader({ request }) {
             gradeByHandle[h] = set ? Array.from(set).join(",") : "";
         }
 
-        // ✅ IMPORTANT: reorder by Shopify Admin manual order
-        // (If Shopify fails, we keep Supabase order as fallback)
+        // 5) Fetch Shopify handles in desired order, then reorder supabase handles
         let shopifyOrderedHandles = [];
         try {
             shopifyOrderedHandles = await fetchShopifyCollectionHandles(admin, collectionHandle, sortSpec);
-        } catch (e) {
+        } catch {
             shopifyOrderedHandles = [];
         }
 
@@ -267,7 +335,12 @@ export async function loader({ request }) {
         return new Response(
             JSON.stringify({
                 ok: true,
+                mode: "collection",
+                shop,
                 collection_handle: collectionHandle,
+                collection_id: collectionId || null,
+                sort_order: sortOrder,
+                sort_spec: sortSpec,
                 grade_selected: gradeSelected || null,
                 total_handles: handles.length,
                 handles,
