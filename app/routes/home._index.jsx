@@ -1,50 +1,114 @@
-// app/routes/home._index.jsx
-import { useLocation, useNavigate } from "react-router";
+import { useNavigate } from "react-router";
 
-const HOME_TABS = [
-  { label: "Home", path: "/home" },
-  { label: "Products", path: "/home/products" },
-  { label: "Settings", path: "/home/settings" },
+/**
+ * Update these whenever you add/remove tabs.
+ * If you want this to auto-update from your <s-link> list,
+ * tell me and I will convert your nav to a shared config file.
+ */
+const HOME_CARDS = [
+  {
+    title: "Products",
+    desc: "Manage products and run sync operations.",
+    path: "/home/products",
+  },
+  {
+    title: "Settings",
+    desc: "Configure app settings and preferences.",
+    path: "/home/settings",
+  },
 ];
+
+// Put your logo file in: /public/logo.png
+// Then this will work: <img src="/logo.png" ... />
+const LOGO_SRC = "/Colours_UNIFORMS-Logo.jpg";
 
 export default function HomeIndex() {
   const navigate = useNavigate();
-  const location = useLocation();
 
   return (
-    <div style={{ padding: 16 }}>
-      <h2 style={{ margin: "0 0 12px" }}>Quick navigation</h2>
-
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-        {HOME_TABS.map((t) => {
-          const active = location.pathname === t.path;
-
-          return (
-            <button
-              key={t.path}
-              type="button"
-              onClick={() => navigate(t.path)}
-              style={{
-                padding: "10px 14px",
-                borderRadius: 10,
-                border: "1px solid #d0d0d0",
-                cursor: "pointer",
-                fontWeight: 600,
-                opacity: active ? 0.65 : 1,
-              }}
-              aria-current={active ? "page" : undefined}
-            >
-              {t.label}
-            </button>
-          );
-        })}
+    <div style={styles.page}>
+      {/* Top logo area */}
+      <div style={styles.header}>
+        <div style={styles.logoWrap}>
+          <img
+            src={LOGO_SRC}
+            alt="App logo"
+            style={styles.logoImg}
+            onError={(e) => {
+              // If logo missing, hide the broken image icon
+              e.currentTarget.style.display = "none";
+            }}
+          />
+        </div>
       </div>
 
-      <div style={{ marginTop: 16, color: "#666" }}>
-        Tip: If you want these buttons to auto-update when you add new{" "}
-        <code>&lt;s-link&gt;</code> items, move the nav items into a shared config
-        array and render both nav + buttons from it.
+      {/* Cards */}
+      <div style={styles.grid}>
+        {HOME_CARDS.map((c) => (
+          <div
+            key={c.path}
+            role="button"
+            tabIndex={0}
+            onClick={() => navigate(c.path)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") navigate(c.path);
+            }}
+            style={styles.card}
+          >
+            <div style={styles.cardTitle}>{c.title}</div>
+            <div style={styles.cardDesc}>{c.desc}</div>
+          </div>
+        ))}
       </div>
     </div>
   );
 }
+
+const styles = {
+  page: {
+    padding: 20,
+  },
+  header: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "flex-start",
+    marginBottom: 16,
+  },
+  logoWrap: {
+    width: "100%",
+    display: "flex",
+    justifyContent: "flex-start",
+  },
+  logoImg: {
+    height: 40,
+    width: "auto",
+    objectFit: "contain",
+  },
+  grid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+    gap: 16,
+  },
+  card: {
+    background: "#fff",
+    border: "1px solid #e5e5e5",
+    borderRadius: 12,
+    padding: 16,
+    cursor: "pointer",
+    userSelect: "none",
+    boxShadow: "0 1px 0 rgba(0,0,0,0.02)",
+    transition: "transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease",
+    outline: "none",
+  },
+  cardTitle: {
+    fontSize: 16,
+    fontWeight: 700,
+    marginBottom: 6,
+    color: "#1f1f1f",
+  },
+  cardDesc: {
+    fontSize: 13,
+    lineHeight: 1.4,
+    color: "#6b6b6b",
+  },
+};
