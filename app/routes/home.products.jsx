@@ -1109,7 +1109,7 @@ export default function GradeCollectionPage() {
     };
 
     return (
-        <Page title="Grade and Collection">
+        <Page fullWidth title="Grade and Collection">
             <Layout>
                 <Layout.Section>
                     {saveError && (

@@ -332,6 +332,7 @@ export default function SettingsPage() {
 
   return (
     <Page
+      fullWidth
       title="Settings"
       subtitle="Set the default sort order for each school collection"
     >

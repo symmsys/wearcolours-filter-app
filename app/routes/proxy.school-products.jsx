@@ -1,6 +1,50 @@
 import { authenticate } from "../shopify.server";
 import { getSupabaseAdmin } from "../supabase.server";
 
+const SETTINGS_TABLE = "settings";
+const DEFAULT_SORT = "COLLECTION_DEFAULT"; // fallback if nothing stored
+
+async function getCollectionSortOrder(supabase, { shop, collectionHandle }) {
+    if (!shop || !collectionHandle) return DEFAULT_SORT;
+
+    const { data, error } = await supabase
+        .from(SETTINGS_TABLE)
+        .select("default_sort_order")
+        .eq("shop", shop)
+        .eq("collection_handle", collectionHandle)
+        .maybeSingle();
+
+    if (error) return DEFAULT_SORT;
+
+    const v = String(data?.default_sort_order || "").trim();
+    return v || DEFAULT_SORT;
+}
+
+function mapSortToShopify(sortOrder) {
+    const s = String(sortOrder || "").trim();
+
+    // Manual / client set order in Admin
+    if (!s || s === "COLLECTION_DEFAULT") {
+        return { sortKey: "COLLECTION_DEFAULT", reverse: false };
+    }
+
+    // Your settings options
+    if (s === "TITLE_ASC") return { sortKey: "TITLE", reverse: false };
+    if (s === "TITLE_DESC") return { sortKey: "TITLE", reverse: true };
+
+    if (s === "PRICE_ASC") return { sortKey: "PRICE", reverse: false };
+    if (s === "PRICE_DESC") return { sortKey: "PRICE", reverse: true };
+
+    // Shopify best-selling is already “best selling first”
+    if (s === "BEST_SELLING") return { sortKey: "BEST_SELLING", reverse: false };
+
+    // CREATED: we want newest first for CREATED_DESC
+    if (s === "CREATED_DESC") return { sortKey: "CREATED", reverse: true };
+    if (s === "CREATED_ASC") return { sortKey: "CREATED", reverse: false };
+
+    return { sortKey: "COLLECTION_DEFAULT", reverse: false };
+}
+
 function splitGrades(value) {
     return String(value || "")
         .split(",")
@@ -8,22 +52,17 @@ function splitGrades(value) {
         .filter(Boolean);
 }
 
-/**
- * Fetch product handles in the SAME order as the collection is sorted in Shopify Admin.
- * This is the “manual / collection default” order.
- */
-async function fetchShopifyCollectionHandlesInOrder(admin, collectionHandle) {
+// Fetch ALL product handles in the collection, in Shopify Admin order (with pagination).
+async function fetchShopifyCollectionHandles(admin, collectionHandle, { sortKey, reverse }) {
     const handles = [];
     let cursor = null;
     let hasNextPage = true;
 
-    // We try COLLECTION_DEFAULT first (best match for Shopify Admin manual order).
-    // If Shopify ever rejects the sortKey, we fallback to default (no sortKey).
-    const queryWithSortKey = `#graphql
-    query CollectionProducts($handle: String!, $first: Int!, $after: String) {
+    const query = `#graphql
+    query CollectionProducts($handle: String!, $first: Int!, $after: String, $reverse: Boolean!) {
       collectionByHandle(handle: $handle) {
         id
-        products(first: $first, after: $after, sortKey: COLLECTION_DEFAULT) {
+        products(first: $first, after: $after, sortKey: ${sortKey}, reverse: $reverse) {
           pageInfo { hasNextPage endCursor }
           edges { node { handle } }
         }
@@ -31,61 +70,30 @@ async function fetchShopifyCollectionHandlesInOrder(admin, collectionHandle) {
     }
   `;
 
-    const queryNoSortKey = `#graphql
-    query CollectionProducts($handle: String!, $first: Int!, $after: String) {
-      collectionByHandle(handle: $handle) {
-        id
-        products(first: $first, after: $after) {
-          pageInfo { hasNextPage endCursor }
-          edges { node { handle } }
-        }
-      }
-    }
-  `;
+    while (hasNextPage) {
+        const resp = await admin.graphql(query, {
+            variables: { handle: collectionHandle, first: 250, after: cursor, reverse: !!reverse },
+        });
 
-    async function runQuery(query) {
-        handles.length = 0;
-        cursor = null;
-        hasNextPage = true;
-
-        while (hasNextPage) {
-            const resp = await admin.graphql(query, {
-                variables: { handle: collectionHandle, first: 250, after: cursor },
-            });
-
-            const json = await resp.json();
-            if (json.errors?.length) {
-                const msg = json.errors.map((e) => e.message).join(" | ");
-                throw new Error(msg);
-            }
-
-            const productsConn = json?.data?.collectionByHandle?.products;
-            if (!productsConn) return []; // collection not found / no products
-
-            for (const edge of productsConn.edges || []) {
-                const h = edge?.node?.handle;
-                if (h) handles.push(String(h).trim());
-            }
-
-            hasNextPage = !!productsConn.pageInfo?.hasNextPage;
-            cursor = productsConn.pageInfo?.endCursor || null;
+        const json = await resp.json();
+        if (json.errors?.length) {
+            const msg = json.errors.map((e) => e.message).join(" | ");
+            throw new Error(msg);
         }
 
-        return handles;
+        const productsConn = json?.data?.collectionByHandle?.products;
+        if (!productsConn) return [];
+
+        for (const edge of productsConn.edges || []) {
+            const h = edge?.node?.handle;
+            if (h) handles.push(String(h).trim());
+        }
+
+        hasNextPage = !!productsConn.pageInfo?.hasNextPage;
+        cursor = productsConn.pageInfo?.endCursor || null;
     }
 
-    // 1) try with sortKey
-    try {
-        return await runQuery(queryWithSortKey);
-    } catch (e) {
-        // 2) fallback to default (Shopify might still return collection order by default)
-        try {
-            return await runQuery(queryNoSortKey);
-        } catch (e2) {
-            // If Shopify fails completely, return empty (caller will keep Supabase order)
-            return [];
-        }
-    }
+    return handles;
 }
 
 /**
@@ -125,6 +133,8 @@ export async function loader({ request }) {
 
         const url = new URL(request.url);
 
+        const shop = (url.searchParams.get("shop") || "").trim().toLowerCase();
+
         const collectionHandle = (url.searchParams.get("collection_handle") || "").trim();
         const gradeSelected = (url.searchParams.get("grade") || "").trim();
         const productHandle = (url.searchParams.get("product_handle") || "").trim();
@@ -137,6 +147,13 @@ export async function loader({ request }) {
         }
 
         const supabase = getSupabaseAdmin();
+
+        const sortOrder = await getCollectionSortOrder(supabase, {
+            shop,
+            collectionHandle,
+        });
+
+        const sortSpec = mapSortToShopify(sortOrder);
 
         let rows = [];
         let error = null;
@@ -237,7 +254,7 @@ export async function loader({ request }) {
         // (If Shopify fails, we keep Supabase order as fallback)
         let shopifyOrderedHandles = [];
         try {
-            shopifyOrderedHandles = await fetchShopifyCollectionHandlesInOrder(admin, collectionHandle);
+            shopifyOrderedHandles = await fetchShopifyCollectionHandles(admin, collectionHandle, sortSpec);
         } catch (e) {
             shopifyOrderedHandles = [];
         }
