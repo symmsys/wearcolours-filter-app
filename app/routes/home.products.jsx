@@ -29,6 +29,16 @@ import { DeleteIcon } from "@shopify/polaris-icons";
 const EXTERNAL_TABLE = "product_grade_collection";
 const MASTER_TABLE = "master database colours"; // exact name, with spaces
 
+// Only allow these collections in dropdown
+const ALLOWED_COLLECTION_IDS = new Set([
+    "gid://shopify/Collection/276875509831",
+    "gid://shopify/Collection/276875247687",
+    "gid://shopify/Collection/276875411527",
+    "gid://shopify/Collection/276875280455",
+    "gid://shopify/Collection/276875444295",
+    "gid://shopify/Collection/282935689287",
+]);
+
 // Shopify metafield: custom.grade
 const GRADE_NAMESPACE = "custom";
 const GRADE_KEY = "grade";
@@ -891,7 +901,14 @@ export default function GradeCollectionPage() {
     }, [autoSyncOn, isSyncing, syncSummary]);
 
     const collectionOptions = useMemo(() => {
-        return [{ label: "No collection", value: "" }, ...(collections || []).map((c) => ({ label: c.title, value: c.id }))];
+        const filtered = (collections || []).filter((c) =>
+            ALLOWED_COLLECTION_IDS.has(String(c.id))
+        );
+
+        return [
+            { label: "No collection", value: "" },
+            ...filtered.map((c) => ({ label: c.title, value: c.id })),
+        ];
     }, [collections]);
 
     const gidToTitle = useMemo(() => {

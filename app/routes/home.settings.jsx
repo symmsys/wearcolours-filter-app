@@ -23,17 +23,26 @@ import {
 /* ─────────────────────────────────────────────
    Constants
 ───────────────────────────────────────────── */
+
+// Only allow these collections in Settings page
+const ALLOWED_COLLECTION_IDS = new Set([
+  "gid://shopify/Collection/276875509831",
+  "gid://shopify/Collection/276875247687",
+  "gid://shopify/Collection/276875411527",
+  "gid://shopify/Collection/276875280455",
+  "gid://shopify/Collection/276875444295",
+  "gid://shopify/Collection/282935689287",
+]);
 const SETTINGS_TABLE = "settings";
 
 const SORT_OPTIONS = [
-  { label: "Title A → Z",      value: "TITLE_ASC" },
-  { label: "Title Z → A",      value: "TITLE_DESC" },
+  { label: "Title A → Z", value: "TITLE_ASC" },
+  { label: "Title Z → A", value: "TITLE_DESC" },
   { label: "Price Low → High", value: "PRICE_ASC" },
   { label: "Price High → Low", value: "PRICE_DESC" },
-  { label: "Best Selling",     value: "BEST_SELLING" },
+  { label: "Best Selling", value: "BEST_SELLING" },
   { label: "Created (Newest)", value: "CREATED_DESC" },
   { label: "Created (Oldest)", value: "CREATED_ASC" },
-  { label: "Manual",           value: "MANUAL" },
 ];
 
 const DEFAULT_SORT = "TITLE_ASC";
@@ -99,7 +108,11 @@ export const loader = async ({ request }) => {
   const shop = session?.shop || "";
   const supabase = getSupabaseAdmin();
 
-  const collections = await fetchAllCollections(admin);
+  const allCollections = await fetchAllCollections(admin);
+
+  const collections = allCollections.filter((c) =>
+    ALLOWED_COLLECTION_IDS.has(String(c.id))
+  );
 
   const { data: rows, error: fetchErr } = await supabase
     .from(SETTINGS_TABLE)
@@ -130,10 +143,10 @@ export const action = async ({ request }) => {
   const intent = cleanText(form.get("intent"));
 
   if (intent === "saveSortOrder") {
-    const collectionId     = cleanText(form.get("collectionId"));
-    const collectionTitle  = cleanText(form.get("collectionTitle"));
+    const collectionId = cleanText(form.get("collectionId"));
+    const collectionTitle = cleanText(form.get("collectionTitle"));
     const collectionHandle = cleanText(form.get("collectionHandle"));
-    const sortOrder        = cleanText(form.get("sortOrder")) || DEFAULT_SORT;
+    const sortOrder = cleanText(form.get("sortOrder")) || DEFAULT_SORT;
 
     if (!collectionId) return { ok: false, error: "Missing collectionId" };
 
@@ -143,11 +156,11 @@ export const action = async ({ request }) => {
         .upsert(
           {
             shop,
-            collection_id:      collectionId,
-            collection_title:   collectionTitle || null,
-            collection_handle:  collectionHandle || null,
+            collection_id: collectionId,
+            collection_title: collectionTitle || null,
+            collection_handle: collectionHandle || null,
             default_sort_order: sortOrder,
-            updated_at:         new Date().toISOString(),
+            updated_at: new Date().toISOString(),
           },
           { onConflict: "shop,collection_id" }
         );
@@ -249,10 +262,10 @@ export default function SettingsPage() {
   const { collections, settingsMap } = useLoaderData();
   const fetcher = useFetcher();
 
-  const [localSettings, setLocalSettings]       = useState({ ...settingsMap });
+  const [localSettings, setLocalSettings] = useState({ ...settingsMap });
   const [savingCollectionId, setSavingCollectionId] = useState(null);
-  const [savedCollectionId, setSavedCollectionId]   = useState(null);
-  const [searchQuery, setSearchQuery]           = useState("");
+  const [savedCollectionId, setSavedCollectionId] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const savedTimerRef = useRef(null);
 
@@ -301,9 +314,9 @@ export default function SettingsPage() {
 
       fetcher.submit(
         {
-          intent:           "saveSortOrder",
-          collectionId:     collection.id,
-          collectionTitle:  collection.title,
+          intent: "saveSortOrder",
+          collectionId: collection.id,
+          collectionTitle: collection.title,
           collectionHandle: collection.handle,
           sortOrder,
         },

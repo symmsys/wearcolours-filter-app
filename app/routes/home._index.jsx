@@ -1,25 +1,20 @@
 import { useNavigate } from "react-router";
 
-/**
- * Update these whenever you add/remove tabs.
- * If you want this to auto-update from your <s-link> list,
- * tell me and I will convert your nav to a shared config file.
- */
 const HOME_CARDS = [
   {
     title: "Products",
-    desc: "Manage products and run sync operations.",
+    desc: "Manage products and sync collections.",
     path: "/home/products",
+    icon: "tag",
   },
   {
     title: "Settings",
-    desc: "Configure app settings and preferences.",
+    desc: "Configure application settings.",
     path: "/home/settings",
+    icon: "gear",
   },
 ];
 
-// Put your logo file in: /public/logo.png
-// Then this will work: <img src="/logo.png" ... />
 const LOGO_SRC = "/Colours_UNIFORMS-Logo.jpg";
 
 export default function HomeIndex() {
@@ -27,36 +22,24 @@ export default function HomeIndex() {
 
   return (
     <div style={styles.page}>
-      {/* Top logo area */}
+
+      {/* Logo */}
       <div style={styles.header}>
-        <div style={styles.logoWrap}>
-          <img
-            src={LOGO_SRC}
-            alt="App logo"
-            style={styles.logoImg}
-            onError={(e) => {
-              // If logo missing, hide the broken image icon
-              e.currentTarget.style.display = "none";
-            }}
-          />
-        </div>
+        <img src={LOGO_SRC} alt="App Logo" style={styles.logo} />
       </div>
 
       {/* Cards */}
       <div style={styles.grid}>
-        {HOME_CARDS.map((c) => (
+        {HOME_CARDS.map((card) => (
           <div
-            key={c.path}
-            role="button"
-            tabIndex={0}
-            onClick={() => navigate(c.path)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") navigate(c.path);
-            }}
+            key={card.path}
             style={styles.card}
+            onClick={() => navigate(card.path)}
           >
-            <div style={styles.cardTitle}>{c.title}</div>
-            <div style={styles.cardDesc}>{c.desc}</div>
+            <div style={styles.icon}>{getIcon(card.icon)}</div>
+
+            <div style={styles.title}>{card.title}</div>
+            <div style={styles.desc}>{card.desc}</div>
           </div>
         ))}
       </div>
@@ -64,51 +47,83 @@ export default function HomeIndex() {
   );
 }
 
+/* ---------- ICONS ---------- */
+
+function getIcon(type) {
+  if (type === "gear") {
+    return (
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+        <path d="M12 15.5A3.5 3.5 0 1 0 12 8.5A3.5 3.5 0 0 0 12 15.5Z" stroke="#444" strokeWidth="2" />
+        <path d="M19.4 15a7.8 7.8 0 0 0 .1-2l2-1.5-2-3.5-2.4 1a7.4 7.4 0 0 0-1.7-1l-.3-2.6h-4l-.3 2.6c-.6.2-1.2.5-1.7 1l-2.4-1-2 3.5 2 1.5a7.8 7.8 0 0 0 0 2l-2 1.5 2 3.5 2.4-1c.5.4 1.1.7 1.7 1l.3 2.6h4l.3-2.6c.6-.2 1.2-.5 1.7-1l2.4 1 2-3.5-2-1.5z"
+          stroke="#444"
+          strokeWidth="2"
+        />
+      </svg>
+    );
+  }
+
+  if (type === "tag") {
+    return (
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+        <path
+          d="M20 12L12 20L4 12V4H12L20 12Z"
+          stroke="#444"
+          strokeWidth="2"
+        />
+        <circle cx="9" cy="9" r="1.5" fill="#444" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+      <path d="M3 10L12 3L21 10V21H3V10Z" stroke="#444" strokeWidth="2" />
+    </svg>
+  );
+}
+
+/* ---------- STYLES ---------- */
+
 const styles = {
   page: {
     padding: 20,
   },
+
   header: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "flex-start",
-    marginBottom: 16,
+    marginBottom: 20,
   },
-  logoWrap: {
-    width: "100%",
-    display: "flex",
-    justifyContent: "flex-start",
-  },
-  logoImg: {
+
+  logo: {
     height: 40,
-    width: "auto",
-    objectFit: "contain",
   },
+
   grid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+    gridTemplateColumns: "repeat(auto-fit, minmax(260px,1fr))",
     gap: 16,
   },
+
   card: {
-    background: "#fff",
-    border: "1px solid #e5e5e5",
+    background: "#f6f6f7",
     borderRadius: 12,
-    padding: 16,
+    padding: 18,
     cursor: "pointer",
-    userSelect: "none",
-    boxShadow: "0 1px 0 rgba(0,0,0,0.02)",
-    transition: "transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease",
-    outline: "none",
+    border: "1px solid #e3e3e3",
+    transition: "all .15s ease",
   },
-  cardTitle: {
+
+  icon: {
+    marginBottom: 10,
+  },
+
+  title: {
     fontSize: 16,
-    fontWeight: 700,
-    marginBottom: 6,
-    color: "#1f1f1f",
+    fontWeight: 600,
+    marginBottom: 4,
   },
-  cardDesc: {
+
+  desc: {
     fontSize: 13,
-    lineHeight: 1.4,
-    color: "#6b6b6b",
+    color: "#666",
   },
 };
