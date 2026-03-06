@@ -74,7 +74,8 @@ async function getCollectionSortOrder(supabase, collectionId) {
         "PRICE_ASC",
         "PRICE_DESC",
         "CREATED_ASC",
-        "CREATED_DESC"
+        "CREATED_DESC",
+        "BEST_SELLING"
     ]);
 
     return ALLOWED_SORTS.has(v) ? v : DEFAULT_SORT;

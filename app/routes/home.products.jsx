@@ -756,6 +756,7 @@ export default function GradeCollectionPage() {
     const [collectionGradeByProductId, setCollectionGradeByProductId] = useState({});
     const [addingCollectionFor, setAddingCollectionFor] = useState(null);
     const [addDraftByProductId, setAddDraftByProductId] = useState({});
+    const [searchQuery, setSearchQuery] = useState("");
 
     // auto-sync controls
     const [syncOffset, setSyncOffset] = useState(0);
@@ -945,6 +946,16 @@ export default function GradeCollectionPage() {
     }, [products]);
 
     const headings = useMemo(() => [{ title: "Product" }, { title: "Collections and grade" }, { title: "Action" }], []);
+
+    const filteredProducts = useMemo(() => {
+        const q = String(searchQuery || "").trim().toLowerCase();
+
+        if (!q) return products;
+
+        return (products || []).filter((p) =>
+            String(p.title || "").toLowerCase().includes(q)
+        );
+    }, [products, searchQuery]);
 
     // progress
     const totalForUI = syncSummary?.masterTotal ?? masterTotal;
@@ -1308,13 +1319,26 @@ export default function GradeCollectionPage() {
                                     </BlockStack>
                                 </Card>
 
+                                <div style={{ maxWidth: 420, marginTop: 12, marginBottom: 12 }}>
+                                    <TextField
+                                        label="Search product"
+                                        labelHidden
+                                        placeholder="Search by product name..."
+                                        value={searchQuery}
+                                        onChange={setSearchQuery}
+                                        autoComplete="off"
+                                        clearButton
+                                        onClearButtonClick={() => setSearchQuery("")}
+                                    />
+                                </div>
+
                                 <IndexTable
                                     resourceName={{ singular: "product", plural: "products" }}
-                                    itemCount={products.length}
+                                    itemCount={filteredProducts.length}
                                     selectable={false}
                                     headings={headings}
                                 >
-                                    {products.map((p, idx) => {
+                                    {filteredProducts.map((p, idx) => {
                                         const currentCollectionGrades = collectionGradeByProductId[p.id] || [];
                                         const originalCollectionGrades =
                                             p.savedCollections && p.savedCollections.length > 0
@@ -1526,7 +1550,7 @@ export default function GradeCollectionPage() {
                                         }}
                                     />
                                     <Text as="span" tone="subdued">
-                                        Showing {products.length} products
+                                        Showing {filteredProducts.length} of {products.length} products
                                     </Text>
                                 </InlineStack>
                             </BlockStack>
