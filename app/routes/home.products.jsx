@@ -160,7 +160,124 @@ async function fetchAllCollections(admin) {
     return all;
 }
 
-async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50, after = null } = {}) {
+async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50, after = null, search = "" } = {}) {
+    const searchText = String(search || "").trim();
+
+    /* ---------------- SEARCH MODE (Supabase global search) ---------------- */
+
+    if (searchText) {
+
+        const { data: matchedRows, error: searchErr } = await supabase
+            .from(EXTERNAL_TABLE)
+            .select("shopify_product_id, product_title, product_handle")
+            .ilike("product_title", `%${searchText}%`)
+            .order("product_title", { ascending: true })
+            .limit(first);
+
+        if (searchErr) throw new Error(searchErr.message);
+
+        const uniqueHandleMap = new Map();
+
+        for (const row of matchedRows || []) {
+            const handle = cleanText(row?.product_handle);
+            if (!handle) continue;
+
+            const key = handle.toLowerCase();
+
+            if (!uniqueHandleMap.has(key)) {
+                uniqueHandleMap.set(key, {
+                    id: row?.shopify_product_id || "",
+                    handle,
+                    title: row?.product_title || "",
+                });
+            }
+        }
+
+        const matchedHandles = Array.from(uniqueHandleMap.values());
+
+        if (!matchedHandles.length) {
+            return {
+                items: [],
+                hasNextPage: false,
+                endCursor: null,
+            };
+        }
+
+        const products = [];
+
+        for (const entry of matchedHandles) {
+
+            const res = await admin.graphql(
+                `#graphql
+            query ProductByHandle($handle: String!) {
+              productByHandle(handle: $handle) {
+                id
+                title
+                handle
+                metafield(namespace: "${GRADE_NAMESPACE}", key: "${GRADE_KEY}") { value }
+                featuredImage { url altText }
+                variants(first: 250) {
+                  edges { node { selectedOptions { name value } } }
+                }
+                collections(first: 1) {
+                  edges { node { id title handle } }
+                }
+              }
+            }
+        `,
+                { variables: { handle: entry.handle } }
+            );
+
+            const json = await parseGraphql(res);
+            const p = json?.data?.productByHandle;
+
+            if (!p?.id) continue;
+
+            const firstCol = p?.collections?.edges?.[0]?.node || null;
+            const variantEdges = p?.variants?.edges || [];
+
+            const collectArray = (optName) => {
+                const vals = [];
+                for (const ve of variantEdges) {
+                    const opts = ve?.node?.selectedOptions || [];
+                    for (const o of opts) {
+                        if (String(o.name || "").toLowerCase() === optName) vals.push(o.value);
+                    }
+                }
+                return Array.from(new Set(vals)).filter(v => v);
+            };
+
+            const firstValue = (optName) => {
+                for (const ve of variantEdges) {
+                    const opts = ve?.node?.selectedOptions || [];
+                    for (const o of opts) {
+                        if (String(o.name || "").toLowerCase() === optName && o.value) return o.value;
+                    }
+                }
+                return null;
+            };
+
+            products.push({
+                id: p.id,
+                title: p.title || "",
+                handle: p.handle || "",
+                grade: p?.metafield?.value || "",
+                imageUrl: p?.featuredImage?.url || "",
+                size: collectArray("size"),
+                size_type: firstValue("size type"),
+                size_range: firstValue("size range"),
+                collectionId: firstCol?.id || "",
+                collectionTitle: firstCol?.title || "",
+                collectionHandle: firstCol?.handle || "",
+            });
+        }
+
+        return {
+            items: products,
+            hasNextPage: false,
+            endCursor: null,
+        };
+    }
     const res = await admin.graphql(
         `#graphql
       query Products($first: Int!, $after: String) {
@@ -380,10 +497,12 @@ export const loader = async ({ request }) => {
 
     const url = new URL(request.url);
     const after = url.searchParams.get("after");
+    const q = (url.searchParams.get("q") || "").trim();
 
     const { items, hasNextPage, endCursor } = await fetchProductsWithGradeAndCollection(admin, supabase, {
         first: 50,
         after: after || null,
+        search: q,
     });
 
     const collections = await fetchAllCollections(admin);
@@ -399,6 +518,7 @@ export const loader = async ({ request }) => {
     return {
         shop,
         products: items,
+        searchQuery: q,
         collections,
         hasNextPage,
         endCursor,
@@ -746,7 +866,7 @@ export const action = async ({ request }) => {
 /* ---------------- UI ---------------- */
 
 export default function GradeCollectionPage() {
-    const { shop, products, collections, hasNextPage, endCursor, after, masterTotal } = useLoaderData();
+    const { shop, products, collections, hasNextPage, endCursor, after, masterTotal, searchQuery: initialSearchQuery } = useLoaderData();
     useAppBridge(); // keep bridge ready
 
     const fetcher = useFetcher(); // saveRow
@@ -1118,6 +1238,33 @@ export default function GradeCollectionPage() {
             return String(v);
         }
     };
+
+    useEffect(() => {
+
+        const timer = setTimeout(() => {
+
+            const url = new URL(window.location.href);
+            const currentQ = url.searchParams.get("q") || "";
+
+            // if search hasn't changed do nothing
+            if (currentQ === searchQuery) return;
+
+            if (searchQuery) {
+                url.searchParams.set("q", searchQuery);
+            } else {
+                url.searchParams.delete("q");
+            }
+
+            // reset pagination when searching
+            url.searchParams.delete("after");
+
+            window.location.href = url.toString();
+
+        }, 400); // small delay so it doesn't reload every keystroke
+
+        return () => clearTimeout(timer);
+
+    }, [searchQuery]);
 
     return (
         <Page fullWidth title="Grade and Collection">
@@ -1538,11 +1685,11 @@ export default function GradeCollectionPage() {
 
                                 <InlineStack align="space-between">
                                     <Pagination
-                                        hasPrevious={!!after}
+                                        hasPrevious={!searchQuery && !!after}
                                         onPrevious={() => {
                                             window.location.href = window.location.pathname;
                                         }}
-                                        hasNext={hasNextPage}
+                                        hasNext={!searchQuery && hasNextPage}
                                         onNext={() => {
                                             const u = new URL(window.location.href);
                                             u.searchParams.set("after", endCursor);
