@@ -931,6 +931,7 @@ export default function GradeCollectionPage() {
     const isSaving = fetcher.state !== "idle";
     const isDeleting = deleteFetcher.state !== "idle";
     const isSyncing = syncFetcher.state !== "idle";
+    const isSearching = searchFetcher.state !== "idle";
 
     const saveError = fetcher.data?.ok === false ? fetcher.data.error : null;
     const deleteError = deleteFetcher.data?.ok === false ? deleteFetcher.data.error : null;
@@ -1468,6 +1469,7 @@ export default function GradeCollectionPage() {
                                         autoComplete="off"
                                         clearButton
                                         onClearButtonClick={() => setSearchQuery("")}
+                                        loading={isSearching}
                                     />
                                 </div>
 
