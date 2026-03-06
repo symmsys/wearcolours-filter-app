@@ -867,15 +867,17 @@ export const action = async ({ request }) => {
 
 export default function GradeCollectionPage() {
     const loaderData = useLoaderData();
-    const data = searchFetcher.data || loaderData;
 
-    const { shop, products, collections, hasNextPage, endCursor, after, masterTotal, searchQuery: initialSearchQuery } = data;
     useAppBridge(); // keep bridge ready
 
     const fetcher = useFetcher(); // saveRow
     const deleteFetcher = useFetcher(); // deleteCollection
     const syncFetcher = useFetcher(); // syncGradesBatch
     const searchFetcher = useFetcher(); // for search form (to reset pagination)
+
+    const data = searchFetcher.data || loaderData;
+
+    const { shop, products, collections, hasNextPage, endCursor, after, masterTotal, searchQuery: initialSearchQuery } = data;
 
     const [collectionGradeByProductId, setCollectionGradeByProductId] = useState({});
     const [addingCollectionFor, setAddingCollectionFor] = useState(null);
@@ -1071,15 +1073,7 @@ export default function GradeCollectionPage() {
 
     const headings = useMemo(() => [{ title: "Product" }, { title: "Collections and grade" }, { title: "Action" }], []);
 
-    const filteredProducts = useMemo(() => {
-        const q = String(searchQuery || "").trim().toLowerCase();
-
-        if (!q) return products;
-
-        return (products || []).filter((p) =>
-            String(p.title || "").toLowerCase().includes(q)
-        );
-    }, [products, searchQuery]);
+    const filteredProducts = products || [];
 
     // progress
     const totalForUI = syncSummary?.masterTotal ?? masterTotal;
