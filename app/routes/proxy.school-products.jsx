@@ -66,9 +66,18 @@ async function getCollectionSortOrder(supabase, collectionId) {
 
     if (error || !data) return DEFAULT_SORT;
 
-    const v = clean(data.default_sort_order);
-    // We ONLY support title sorts here. Everything else falls back to TITLE_ASC.
-    return v === "TITLE_DESC" ? "TITLE_DESC" : "TITLE_ASC";
+    const v = clean(data.default_sort_order).toUpperCase();
+
+    const ALLOWED_SORTS = new Set([
+        "TITLE_ASC",
+        "TITLE_DESC",
+        "PRICE_ASC",
+        "PRICE_DESC",
+        "CREATED_ASC",
+        "CREATED_DESC"
+    ]);
+
+    return ALLOWED_SORTS.has(v) ? v : DEFAULT_SORT;
 }
 
 /* ---------------- Proxy Loader ---------------- */
@@ -199,17 +208,12 @@ export async function loader({ request }) {
         }
 
         const uniqueRows = Array.from(rowByHandle.values());
+        const handles = uniqueRows
+            .map((r) => clean(r.product_handle))
+            .filter(Boolean);
 
-        // SORT ONLY BY product_title (fallback to handle)
-        const isDesc = sortOrder === "TITLE_DESC";
-        uniqueRows.sort((a, b) => {
-            const ta = clean(a.product_title) || clean(a.product_handle);
-            const tb = clean(b.product_title) || clean(b.product_handle);
-            return isDesc ? tb.localeCompare(ta) : ta.localeCompare(tb);
-        });
 
-        // output sorted handles
-        const handles = uniqueRows.map((r) => clean(r.product_handle)).filter(Boolean);
+
 
         const gradeByHandle = {};
         for (const h of handles) {
