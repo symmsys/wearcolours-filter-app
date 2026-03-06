@@ -1238,22 +1238,25 @@ export default function GradeCollectionPage() {
     };
 
     useEffect(() => {
+        const trimmed = String(searchQuery || "").trim();
+        const initialTrimmed = String(initialSearchQuery || "").trim();
+
+        // do nothing on first mount if input matches loader state
+        if (trimmed === initialTrimmed) return;
 
         const timer = setTimeout(() => {
-
             const params = new URLSearchParams();
 
-            if (searchQuery) {
-                params.set("q", searchQuery);
+            if (trimmed) {
+                params.set("q", trimmed);
             }
 
-            searchFetcher.load(`/home/products?${params.toString()}`);
-
+            const qs = params.toString();
+            searchFetcher.load(qs ? `${window.location.pathname}?${qs}` : window.location.pathname);
         }, 400);
 
         return () => clearTimeout(timer);
-
-    }, [searchQuery]);
+    }, [searchQuery, initialSearchQuery]);
 
     return (
         <Page fullWidth title="Grade and Collection">
