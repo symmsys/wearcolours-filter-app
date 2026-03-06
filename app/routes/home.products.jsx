@@ -866,17 +866,21 @@ export const action = async ({ request }) => {
 /* ---------------- UI ---------------- */
 
 export default function GradeCollectionPage() {
-    const { shop, products, collections, hasNextPage, endCursor, after, masterTotal, searchQuery: initialSearchQuery } = useLoaderData();
+    const loaderData = useLoaderData();
+    const data = searchFetcher.data || loaderData;
+
+    const { shop, products, collections, hasNextPage, endCursor, after, masterTotal, searchQuery: initialSearchQuery } = data;
     useAppBridge(); // keep bridge ready
 
     const fetcher = useFetcher(); // saveRow
     const deleteFetcher = useFetcher(); // deleteCollection
     const syncFetcher = useFetcher(); // syncGradesBatch
+    const searchFetcher = useFetcher(); // for search form (to reset pagination)
 
     const [collectionGradeByProductId, setCollectionGradeByProductId] = useState({});
     const [addingCollectionFor, setAddingCollectionFor] = useState(null);
     const [addDraftByProductId, setAddDraftByProductId] = useState({});
-    const [searchQuery, setSearchQuery] = useState("");
+    const [searchQuery, setSearchQuery] = useState(initialSearchQuery || "");
 
     // auto-sync controls
     const [syncOffset, setSyncOffset] = useState(0);
@@ -1243,24 +1247,15 @@ export default function GradeCollectionPage() {
 
         const timer = setTimeout(() => {
 
-            const url = new URL(window.location.href);
-            const currentQ = url.searchParams.get("q") || "";
-
-            // if search hasn't changed do nothing
-            if (currentQ === searchQuery) return;
+            const params = new URLSearchParams();
 
             if (searchQuery) {
-                url.searchParams.set("q", searchQuery);
-            } else {
-                url.searchParams.delete("q");
+                params.set("q", searchQuery);
             }
 
-            // reset pagination when searching
-            url.searchParams.delete("after");
+            searchFetcher.load(`/home/products?${params.toString()}`);
 
-            window.location.href = url.toString();
-
-        }, 400); // small delay so it doesn't reload every keystroke
+        }, 400);
 
         return () => clearTimeout(timer);
 
