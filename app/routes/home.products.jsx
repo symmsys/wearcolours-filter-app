@@ -21,10 +21,7 @@ import {
     Select,
     Pagination,
     Badge,
-    ProgressBar,
 } from "@shopify/polaris";
-
-import { DeleteIcon } from "@shopify/polaris-icons";
 
 const EXTERNAL_TABLE = "product_grade_collection";
 const MASTER_TABLE = "master database colours"; // exact name, with spaces
@@ -331,6 +328,147 @@ async function fetchProductsWithGradeAndCollection(
             endCursor: null,
         };
     }
+
+    if (!searchText && collectionId) {
+        const numericOffset = Number.isFinite(Number(after)) ? Number(after) : 0;
+
+        const { data: matchedRows, error: matchErr } = await supabase
+            .from(EXTERNAL_TABLE)
+            .select(`
+            shopify_product_id,
+            product_title,
+            product_handle,
+            collection_id,
+            collection_title,
+            collection_handle,
+            grade
+        `)
+            .eq("collection_id", collectionId)
+            .order("product_title", { ascending: true });
+
+        if (matchErr) throw new Error(matchErr.message);
+
+        const uniqueHandleMap = new Map();
+
+        for (const row of matchedRows || []) {
+            const handle = cleanText(row?.product_handle);
+            if (!handle) continue;
+
+            const key = handle.toLowerCase();
+
+            if (!uniqueHandleMap.has(key)) {
+                uniqueHandleMap.set(key, {
+                    id: row?.shopify_product_id || "",
+                    handle,
+                    title: row?.product_title || "",
+                    collection_id: cleanText(row?.collection_id),
+                    collection_title: cleanText(row?.collection_title),
+                    collection_handle: cleanText(row?.collection_handle),
+                    grade: cleanText(row?.grade),
+                });
+            }
+        }
+
+        const matchedProducts = Array.from(uniqueHandleMap.values());
+
+        if (!matchedProducts.length) {
+            return {
+                items: [],
+                hasNextPage: false,
+                endCursor: null,
+            };
+        }
+
+        const pagedMatches = matchedProducts.slice(numericOffset, numericOffset + first);
+        const nextOffset = numericOffset + first;
+        const hasNextPage = nextOffset < matchedProducts.length;
+
+        const handles = pagedMatches
+            .map((entry) => cleanText(entry.handle))
+            .filter(Boolean);
+
+        const ageSizeRangeMap = await fetchAgeSizeRangeMap(supabase, handles);
+
+        const products = [];
+
+        for (const entry of pagedMatches) {
+            const res = await admin.graphql(
+                `#graphql
+            query ProductByHandle($handle: String!) {
+              productByHandle(handle: $handle) {
+                id
+                title
+                handle
+                metafield(namespace: "${GRADE_NAMESPACE}", key: "${GRADE_KEY}") { value }
+                featuredImage { url altText }
+                variants(first: 250) {
+                  edges { node { selectedOptions { name value } } }
+                }
+              }
+            }
+            `,
+                { variables: { handle: entry.handle } }
+            );
+
+            const json = await parseGraphql(res);
+            const p = json?.data?.productByHandle;
+
+            if (!p?.id) continue;
+
+            const variantEdges = p?.variants?.edges || [];
+
+            const collectArray = (optName) => {
+                const vals = [];
+                for (const ve of variantEdges) {
+                    const opts = ve?.node?.selectedOptions || [];
+                    for (const o of opts) {
+                        if (String(o.name || "").toLowerCase() === optName) vals.push(o.value);
+                    }
+                }
+                return Array.from(new Set(vals)).filter((v) => v != null && String(v).trim() !== "");
+            };
+
+            const firstValue = (optName) => {
+                for (const ve of variantEdges) {
+                    const opts = ve?.node?.selectedOptions || [];
+                    for (const o of opts) {
+                        if (String(o.name || "").toLowerCase() === optName && o.value) return o.value;
+                    }
+                }
+                return null;
+            };
+
+            products.push({
+                id: p.id,
+                title: p.title || entry.title || "",
+                handle: p.handle || entry.handle || "",
+                grade: entry.grade || p?.metafield?.value || "",
+                imageUrl: p?.featuredImage?.url || "",
+                size: collectArray("size"),
+                size_type: firstValue("size type"),
+                size_range: firstValue("size range"),
+                age_size_range: ageSizeRangeMap[cleanText(p.handle).toLowerCase()] || "",
+                collectionId: entry.collection_id || "",
+                collectionTitle: entry.collection_title || "",
+                collectionHandle: entry.collection_handle || "",
+                savedCollections: [
+                    {
+                        id: entry.collection_id || "",
+                        title: entry.collection_title || "",
+                        handle: entry.collection_handle || "",
+                        grade: entry.grade || "",
+                    },
+                ],
+            });
+        }
+
+        return {
+            items: products,
+            hasNextPage,
+            endCursor: hasNextPage ? String(nextOffset) : null,
+        };
+    }
+
     const res = await admin.graphql(
         `#graphql
       query Products($first: Int!, $after: String) {
@@ -448,16 +586,12 @@ async function fetchProductsWithGradeAndCollection(
         };
     });
 
-    const filteredMergedItems = collectionId
-        ? mergedItems.filter((item) =>
-            (item.savedCollections || []).some((c) => String(c.id) === String(collectionId))
-        )
-        : mergedItems;
+
 
     return {
-        items: filteredMergedItems,
-        hasNextPage: collectionId ? false : !!conn?.pageInfo?.hasNextPage,
-        endCursor: collectionId ? null : conn?.pageInfo?.endCursor || null,
+        items: mergedItems,
+        hasNextPage: !!conn?.pageInfo?.hasNextPage,
+        endCursor: conn?.pageInfo?.endCursor || null,
     };
 }
 
@@ -947,7 +1081,6 @@ export default function GradeCollectionPage() {
     useAppBridge(); // keep bridge ready
 
     const fetcher = useFetcher(); // saveRow
-    const deleteFetcher = useFetcher(); // deleteCollection
     const syncFetcher = useFetcher(); // syncGradesBatch
     const searchFetcher = useFetcher(); // for search form (to reset pagination)
 
@@ -1023,12 +1156,13 @@ export default function GradeCollectionPage() {
     }, [syncOffset]);
 
     const isSaving = fetcher.state !== "idle";
-    const isDeleting = deleteFetcher.state !== "idle";
     const isSyncing = syncFetcher.state !== "idle";
     const isSearching = searchFetcher.state !== "idle";
 
+    // Track if we're currently searching (not filtering)
+    const [isSearchLoading, setIsSearchLoading] = useState(false);
+
     const saveError = fetcher.data?.ok === false ? fetcher.data.error : null;
-    const deleteError = deleteFetcher.data?.ok === false ? deleteFetcher.data.error : null;
 
     const syncError =
         syncFetcher.data?.intent === "syncGradesBatch" && syncFetcher.data?.ok === false ? syncFetcher.data.error : null;
@@ -1353,15 +1487,6 @@ export default function GradeCollectionPage() {
         );
     };
 
-    const deleteOneCollection = (productId, collectionId, colIdx) => {
-        setCollectionGradeByProductId((prev) => {
-            const existing = prev[productId] || [];
-            return { ...prev, [productId]: existing.filter((_, i) => i !== colIdx) };
-        });
-
-        deleteFetcher.submit({ intent: "deleteCollection", productId, collectionId }, { method: "POST" });
-    };
-
     const savingThisRow = (pid) => isSaving && fetcher.formData?.get("productId") === pid;
 
     const renderErrorText = (v) => {
@@ -1383,6 +1508,11 @@ export default function GradeCollectionPage() {
         if (trimmed === initialTrimmed && selectedTrimmed === initialSelectedTrimmed) return;
 
         const timer = setTimeout(() => {
+            // Set search loading only if search query changed
+            if (trimmed !== initialTrimmed) {
+                setIsSearchLoading(true);
+            }
+
             const params = new URLSearchParams();
 
             if (trimmed) {
@@ -1404,6 +1534,13 @@ export default function GradeCollectionPage() {
 
     }, [searchQuery, selectedCollectionId, initialSearchQuery, initialSelectedCollectionId]);
 
+    // Reset search loading when fetcher completes
+    useEffect(() => {
+        if (searchFetcher.state === "idle") {
+            setIsSearchLoading(false);
+        }
+    }, [searchFetcher.state]);
+
     return (
         <Page fullWidth title="Grade and Collection">
             <Layout>
@@ -1411,12 +1548,6 @@ export default function GradeCollectionPage() {
                     {saveError && (
                         <Banner tone="critical" title="Save error">
                             <p>{renderErrorText(saveError)}</p>
-                        </Banner>
-                    )}
-
-                    {deleteError && (
-                        <Banner tone="critical" title="Delete error">
-                            <p>{renderErrorText(deleteError)}</p>
                         </Banner>
                     )}
 
@@ -1455,20 +1586,20 @@ export default function GradeCollectionPage() {
                                         <Button
                                             variant="primary"
                                             loading={autoSyncOn}
-                                            disabled={isSaving || isDeleting || autoSyncOn || alreadyComplete}
+                                            disabled={isSaving || autoSyncOn || alreadyComplete}
                                             onClick={startAutoSync}
                                         >
                                             Sync all
                                         </Button>
 
                                         {autoSyncOn ? (
-                                            <Button tone="critical" disabled={isSaving || isDeleting} onClick={stopAutoSync}>
+                                            <Button tone="critical" disabled={isSaving} onClick={stopAutoSync}>
                                                 Stop
                                             </Button>
                                         ) : null}
 
                                         <Button
-                                            disabled={isSaving || isDeleting || isSyncing || autoSyncOn || alreadyComplete}
+                                            disabled={isSaving || isSyncing || autoSyncOn || alreadyComplete}
                                             onClick={() =>
                                                 syncFetcher.submit(
                                                     {
@@ -1630,7 +1761,7 @@ export default function GradeCollectionPage() {
                                             autoComplete="off"
                                             clearButton
                                             onClearButtonClick={() => setSearchQuery("")}
-                                            loading={isSearching}
+                                            loading={isSearchLoading}
                                         />
                                     </div>
 
@@ -1715,32 +1846,29 @@ export default function GradeCollectionPage() {
 
                                                     <IndexTable.Cell>
                                                         <BlockStack gap="150">
-                                                            {allowedCollections.length === 0 && addingCollectionFor !== p.id && (
+                                                            {currentCollectionGrades.length === 0 && addingCollectionFor !== p.id && (
                                                                 <Text tone="subdued">—</Text>
                                                             )}
 
-                                                            {allowedCollections.map((collItem, colIdx) => (
-                                                                <InlineStack
-                                                                    key={`${p.id}-collection-${colIdx}`}
-                                                                    gap="200"
-                                                                    blockAlign="center"
-                                                                    wrap={false}
-                                                                >
-                                                                    <div style={{ width: 180, whiteSpace: "normal" }}>
-                                                                        <Badge tone="info">{collItem.title}</Badge>
-                                                                    </div>
-
-                                                                    <Button
-                                                                        tone="critical"
-                                                                        size="slim"
-                                                                        onClick={() =>
-                                                                            deleteOneCollection(p.id, collItem.id, colIdx)
-                                                                        }
+                                                            {currentCollectionGrades.map((collItem, colIdx) => {
+                                                                const isAllowed = ALLOWED_COLLECTION_IDS.has(String(collItem.id));
+                                                                return (
+                                                                    <InlineStack
+                                                                        key={`${p.id}-collection-${colIdx}`}
+                                                                        gap="200"
+                                                                        blockAlign="center"
+                                                                        wrap={false}
                                                                     >
-                                                                        Remove
-                                                                    </Button>
-                                                                </InlineStack>
-                                                            ))}
+                                                                        <div style={{ width: 180, whiteSpace: "normal" }}>
+                                                                            {isAllowed ? (
+                                                                                <Badge tone="info">{collItem.title}</Badge>
+                                                                            ) : (
+                                                                                <Text tone="subdued">—</Text>
+                                                                            )}
+                                                                        </div>
+                                                                    </InlineStack>
+                                                                );
+                                                            })}
 
                                                             {addingCollectionFor === p.id ? (
                                                                 <BlockStack gap="100">
@@ -1836,11 +1964,11 @@ export default function GradeCollectionPage() {
 
                                                     <IndexTable.Cell>
                                                         <BlockStack gap="150">
-                                                            {allowedCollections.length === 0 && addingCollectionFor !== p.id && (
+                                                            {currentCollectionGrades.length === 0 && addingCollectionFor !== p.id && (
                                                                 <Text tone="subdued">—</Text>
                                                             )}
 
-                                                            {allowedCollections.map((collItem, colIdx) => (
+                                                            {currentCollectionGrades.map((collItem, colIdx) => (
                                                                 <div key={`${p.id}-grade-${colIdx}`} style={{ width: "100%", minWidth: 130 }}>
                                                                     <TextField
                                                                         label={`Grade for ${collItem.title}`}
@@ -1932,11 +2060,14 @@ export default function GradeCollectionPage() {
 
                                 <InlineStack align="space-between">
                                     <Pagination
-                                        hasPrevious={!searchQuery && !selectedCollectionId && !!after}
+                                        hasPrevious={!!after}
                                         onPrevious={() => {
-                                            window.location.href = window.location.pathname;
+                                            const u = new URL(window.location.href);
+                                            // Remove after parameter to go to first page
+                                            u.searchParams.delete("after");
+                                            window.location.href = u.toString();
                                         }}
-                                        hasNext={!searchQuery && !selectedCollectionId && hasNextPage}
+                                        hasNext={hasNextPage}
                                         onNext={() => {
                                             const u = new URL(window.location.href);
                                             u.searchParams.set("after", endCursor);
