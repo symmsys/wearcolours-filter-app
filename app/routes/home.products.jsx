@@ -1336,16 +1336,7 @@ export default function GradeCollectionPage() {
     { title: "Grade" }, { title: "Action" }], []);
 
     const filteredProducts = products || [];
-
-    function getAllowedCollectionsForProduct(productId) {
-        const all = collectionGradeByProductId[productId] || [];
-
-        const allowed = all.filter((c) =>
-            ALLOWED_COLLECTION_IDS.has(String(c.id))
-        );
-
-        return allowed;
-    }
+    const shouldShowPagination = !!after || hasNextPage;
 
     // progress
     const totalForUI = syncSummary?.masterTotal ?? masterTotal;
@@ -2095,21 +2086,25 @@ export default function GradeCollectionPage() {
                                 </div>
 
                                 <InlineStack align="space-between">
-                                    <Pagination
-                                        hasPrevious={!!after}
-                                        onPrevious={() => {
-                                            const u = new URL(window.location.href);
-                                            // Remove after parameter to go to first page
-                                            u.searchParams.delete("after");
-                                            window.location.href = u.toString();
-                                        }}
-                                        hasNext={hasNextPage}
-                                        onNext={() => {
-                                            const u = new URL(window.location.href);
-                                            u.searchParams.set("after", endCursor);
-                                            window.location.href = u.toString();
-                                        }}
-                                    />
+                                    {shouldShowPagination ? (
+                                        <Pagination
+                                            hasPrevious={!!after}
+                                            onPrevious={() => {
+                                                const u = new URL(window.location.href);
+                                                u.searchParams.delete("after");
+                                                window.location.href = u.toString();
+                                            }}
+                                            hasNext={hasNextPage}
+                                            onNext={() => {
+                                                const u = new URL(window.location.href);
+                                                u.searchParams.set("after", endCursor);
+                                                window.location.href = u.toString();
+                                            }}
+                                        />
+                                    ) : (
+                                        <div />
+                                    )}
+
                                     <Text as="span" tone="subdued">
                                         Showing {filteredProducts.length} of {products.length} products
                                     </Text>
