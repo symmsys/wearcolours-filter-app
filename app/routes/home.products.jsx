@@ -195,17 +195,27 @@ async function fetchAgeSizeRangeMap(supabase, handles = []) {
     }
 }
 
-async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50, after = null, search = "" } = {}) {
+async function fetchProductsWithGradeAndCollection(
+    admin,
+    supabase,
+    { first = 50, after = null, search = "", collectionId = "" } = {}
+) {
     const searchText = String(search || "").trim();
 
     /* ---------------- SEARCH MODE (Supabase global search) ---------------- */
 
     if (searchText) {
 
-        const { data: matchedRows, error: searchErr } = await supabase
+        let searchQueryBuilder = supabase
             .from(EXTERNAL_TABLE)
-            .select("shopify_product_id, product_title, product_handle")
-            .ilike("product_title", `%${searchText}%`)
+            .select("shopify_product_id, product_title, product_handle, collection_id")
+            .ilike("product_title", `%${searchText}%`);
+
+        if (collectionId) {
+            searchQueryBuilder = searchQueryBuilder.eq("collection_id", collectionId);
+        }
+
+        const { data: matchedRows, error: searchErr } = await searchQueryBuilder
             .order("product_title", { ascending: true })
             .limit(first);
 
@@ -217,13 +227,14 @@ async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50
             const handle = cleanText(row?.product_handle);
             if (!handle) continue;
 
-            const key = handle.toLowerCase();
+            const key = `${handle.toLowerCase()}::${cleanText(row?.collection_id)}`;
 
             if (!uniqueHandleMap.has(key)) {
                 uniqueHandleMap.set(key, {
                     id: row?.shopify_product_id || "",
                     handle,
                     title: row?.product_title || "",
+                    collection_id: cleanText(row?.collection_id),
                 });
             }
         }
@@ -437,10 +448,16 @@ async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50
         };
     });
 
+    const filteredMergedItems = collectionId
+        ? mergedItems.filter((item) =>
+            (item.savedCollections || []).some((c) => String(c.id) === String(collectionId))
+        )
+        : mergedItems;
+
     return {
-        items: mergedItems,
-        hasNextPage: !!conn?.pageInfo?.hasNextPage,
-        endCursor: conn?.pageInfo?.endCursor || null,
+        items: filteredMergedItems,
+        hasNextPage: collectionId ? false : !!conn?.pageInfo?.hasNextPage,
+        endCursor: collectionId ? null : conn?.pageInfo?.endCursor || null,
     };
 }
 
@@ -554,11 +571,13 @@ export const loader = async ({ request }) => {
     const url = new URL(request.url);
     const after = url.searchParams.get("after");
     const q = (url.searchParams.get("q") || "").trim();
+    const collectionId = (url.searchParams.get("collectionId") || "").trim();
 
     const { items, hasNextPage, endCursor } = await fetchProductsWithGradeAndCollection(admin, supabase, {
         first: 50,
         after: after || null,
         search: q,
+        collectionId,
     });
 
     const collections = await fetchAllCollections(admin);
@@ -575,6 +594,7 @@ export const loader = async ({ request }) => {
         shop,
         products: items,
         searchQuery: q,
+        selectedCollectionId: collectionId,
         collections,
         hasNextPage,
         endCursor,
@@ -933,9 +953,24 @@ export default function GradeCollectionPage() {
 
     const data = searchFetcher.data || loaderData;
 
-    const { shop, products, collections, hasNextPage, endCursor, after, masterTotal, searchQuery: initialSearchQuery } = data;
+    const {
+        shop,
+        products,
+        collections,
+        hasNextPage,
+        endCursor,
+        after,
+        masterTotal,
+        searchQuery: initialSearchQuery,
+        selectedCollectionId: initialSelectedCollectionId,
+    } = data;
 
     const [collectionGradeByProductId, setCollectionGradeByProductId] = useState({});
+
+    const [selectedCollectionId, setSelectedCollectionId] = useState(initialSelectedCollectionId || "");
+    useEffect(() => {
+        setSelectedCollectionId(initialSelectedCollectionId || "");
+    }, [initialSelectedCollectionId]);
     const [addingCollectionFor, setAddingCollectionFor] = useState(null);
     const [addDraftByProductId, setAddDraftByProductId] = useState({});
     const [searchQuery, setSearchQuery] = useState(initialSearchQuery || "");
@@ -1112,6 +1147,20 @@ export default function GradeCollectionPage() {
         return [
             { label: "No collection", value: "" },
             ...filtered.map((c) => ({ label: c.title, value: c.id })),
+        ];
+    }, [collections]);
+
+    const allowedCollectionFilterOptions = useMemo(() => {
+        const filtered = (collections || []).filter((c) =>
+            ALLOWED_COLLECTION_IDS.has(String(c.id))
+        );
+
+        return [
+            { label: "All collections", value: "" },
+            ...filtered.map((c) => ({
+                label: c.title,
+                value: c.id,
+            })),
         ];
     }, [collections]);
 
@@ -1328,9 +1377,10 @@ export default function GradeCollectionPage() {
     useEffect(() => {
         const trimmed = String(searchQuery || "").trim();
         const initialTrimmed = String(initialSearchQuery || "").trim();
+        const selectedTrimmed = String(selectedCollectionId || "").trim();
+        const initialSelectedTrimmed = String(initialSelectedCollectionId || "").trim();
 
-        // do nothing on first mount if input matches loader state
-        if (trimmed === initialTrimmed) return;
+        if (trimmed === initialTrimmed && selectedTrimmed === initialSelectedTrimmed) return;
 
         const timer = setTimeout(() => {
             const params = new URLSearchParams();
@@ -1339,12 +1389,20 @@ export default function GradeCollectionPage() {
                 params.set("q", trimmed);
             }
 
+            if (selectedTrimmed) {
+                params.set("collectionId", selectedTrimmed);
+            }
+
             const qs = params.toString();
-            searchFetcher.load(qs ? `${window.location.pathname}?${qs}` : window.location.pathname);
+
+            searchFetcher.load(
+                qs ? `${window.location.pathname}?${qs}` : window.location.pathname
+            );
         }, 400);
 
         return () => clearTimeout(timer);
-    }, [searchQuery, initialSearchQuery]);
+
+    }, [searchQuery, selectedCollectionId, initialSearchQuery, initialSelectedCollectionId]);
 
     return (
         <Page fullWidth title="Grade and Collection">
@@ -1554,256 +1612,320 @@ export default function GradeCollectionPage() {
                                     </BlockStack>
                                 </Card>
 
-                                <div style={{ maxWidth: 420, marginTop: 12, marginBottom: 12 }}>
-                                    <TextField
-                                        label="Search product"
-                                        labelHidden
-                                        placeholder="Search by product name..."
-                                        value={searchQuery}
-                                        onChange={setSearchQuery}
-                                        autoComplete="off"
-                                        clearButton
-                                        onClearButtonClick={() => setSearchQuery("")}
-                                        loading={isSearching}
-                                    />
-                                </div>
-
-                                <IndexTable
-                                    resourceName={{ singular: "product", plural: "products" }}
-                                    itemCount={filteredProducts.length}
-                                    selectable={false}
-                                    headings={headings}
+                                <div
+                                    style={{
+                                        display: "flex",
+                                        justifyContent: "space-between",
+                                        alignItems: "center",
+                                        gap: 16,
+                                        marginTop: 12,
+                                        marginBottom: 12,
+                                        flexWrap: "wrap",
+                                    }}
                                 >
-                                    {filteredProducts.map((p, idx) => {
-                                        const currentCollectionGrades = collectionGradeByProductId[p.id] || [];
-                                        const allowedCollections = currentCollectionGrades.filter((c) =>
-                                            ALLOWED_COLLECTION_IDS.has(String(c.id))
-                                        );
-                                        const originalCollectionGrades =
-                                            p.savedCollections && p.savedCollections.length > 0
-                                                ? p.savedCollections
-                                                : p.collectionId && p.collectionTitle
-                                                    ? [
-                                                        {
-                                                            id: p.collectionId,
-                                                            title: p.collectionTitle,
-                                                            handle: p.collectionHandle || "",
-                                                            grade: p.grade || "",
-                                                        },
-                                                    ]
-                                                    : [];
 
-                                        const changed = JSON.stringify(currentCollectionGrades) !== JSON.stringify(originalCollectionGrades);
+                                    <div style={{ flex: "1 1 420px", maxWidth: 420 }}>
+                                        <TextField
+                                            label="Search product"
+                                            labelHidden
+                                            placeholder="Search by product name..."
+                                            value={searchQuery}
+                                            onChange={setSearchQuery}
+                                            autoComplete="off"
+                                            clearButton
+                                            onClearButtonClick={() => setSearchQuery("")}
+                                            loading={isSearching}
+                                        />
+                                    </div>
 
-                                        return (
-                                            <IndexTable.Row id={p.id} key={p.id} position={idx}>
-                                                <IndexTable.Cell>
-                                                    <InlineStack align="trailing" gap="100">
-                                                        {p.imageUrl ? (
-                                                            <img
-                                                                src={p.imageUrl}
-                                                                alt={p.title || ""}
-                                                                style={{ width: 48, height: 48, objectFit: "cover", borderRadius: 6 }}
-                                                            />
-                                                        ) : (
-                                                            <div style={{ width: 48, height: 48, background: "#f4f6f8", borderRadius: 6 }} />
-                                                        )}
-                                                        <BlockStack gap="050">
-                                                            <Text as="span">{p.title}</Text>
-                                                        </BlockStack>
+                                    <div style={{ width: 280 }}>
+                                        <Select
+                                            label="Filter by collection"
+                                            labelHidden
+                                            options={allowedCollectionFilterOptions}
+                                            value={selectedCollectionId}
+                                            onChange={setSelectedCollectionId}
+                                        />
+                                    </div>
+
+                                </div>
+                                <TextField
+                                    label="Search product"
+                                    labelHidden
+                                    placeholder="Search by product name..."
+                                    value={searchQuery}
+                                    onChange={setSearchQuery}
+                                    autoComplete="off"
+                                    clearButton
+                                    onClearButtonClick={() => setSearchQuery("")}
+                                    loading={isSearching}
+                                />
+                        </div>
+
+                        <IndexTable
+                            resourceName={{ singular: "product", plural: "products" }}
+                            itemCount={filteredProducts.length}
+                            selectable={false}
+                            headings={headings}
+                        >
+                            {filteredProducts.map((p, idx) => {
+                                const currentCollectionGrades = collectionGradeByProductId[p.id] || [];
+                                const allowedCollections = currentCollectionGrades.filter((c) =>
+                                    ALLOWED_COLLECTION_IDS.has(String(c.id))
+                                );
+                                const originalCollectionGrades =
+                                    p.savedCollections && p.savedCollections.length > 0
+                                        ? p.savedCollections
+                                        : p.collectionId && p.collectionTitle
+                                            ? [
+                                                {
+                                                    id: p.collectionId,
+                                                    title: p.collectionTitle,
+                                                    handle: p.collectionHandle || "",
+                                                    grade: p.grade || "",
+                                                },
+                                            ]
+                                            : [];
+
+                                const changed = JSON.stringify(currentCollectionGrades) !== JSON.stringify(originalCollectionGrades);
+
+                                return (
+                                    <IndexTable.Row id={p.id} key={p.id} position={idx}>
+                                        <IndexTable.Cell>
+                                            <InlineStack align="trailing" gap="100">
+                                                {p.imageUrl ? (
+                                                    <img
+                                                        src={p.imageUrl}
+                                                        alt={p.title || ""}
+                                                        style={{ width: 48, height: 48, objectFit: "cover", borderRadius: 6 }}
+                                                    />
+                                                ) : (
+                                                    <div style={{ width: 48, height: 48, background: "#f4f6f8", borderRadius: 6 }} />
+                                                )}
+                                                <BlockStack gap="050">
+                                                    <Text as="span">{p.title}</Text>
+                                                </BlockStack>
+                                            </InlineStack>
+                                        </IndexTable.Cell>
+
+                                        <IndexTable.Cell>
+                                            <Text as="span" tone={p.age_size_range ? "base" : "subdued"}>
+                                                {p.age_size_range || ""}
+                                            </Text>
+                                        </IndexTable.Cell>
+
+                                        <IndexTable.Cell>
+                                            <BlockStack gap="150">
+                                                {allowedCollections.length === 0 && addingCollectionFor !== p.id && (
+                                                    <Text tone="subdued">—</Text>
+                                                )}
+
+                                                {allowedCollections.map((collItem, colIdx) => (
+                                                    <InlineStack
+                                                        key={`${p.id}-collection-${colIdx}`}
+                                                        gap="200"
+                                                        blockAlign="center"
+                                                        wrap={false}
+                                                    >
+                                                        <div style={{ width: 180, whiteSpace: "normal" }}>
+                                                            <Badge tone="info">{collItem.title}</Badge>
+                                                        </div>
+
+                                                        <Button
+                                                            tone="critical"
+                                                            size="slim"
+                                                            onClick={() => deleteOneCollection(p.id, collItem.id, colIdx)}
+                                                        >
+                                                            Remove
+                                                        </Button>
                                                     </InlineStack>
-                                                </IndexTable.Cell>
+                                                ))}
 
-                                                <IndexTable.Cell>
-                                                    <Text as="span" tone={p.age_size_range ? "base" : "subdued"}>
-                                                        {p.age_size_range || ""}
-                                                    </Text>
-                                                </IndexTable.Cell>
-
-                                                <IndexTable.Cell>
-                                                    <BlockStack gap="150">
-                                                        {allowedCollections.length === 0 && addingCollectionFor !== p.id && (
-                                                            <Text tone="subdued">—</Text>
-                                                        )}
-
-                                                        {allowedCollections.map((collItem, colIdx) => (
-                                                            <div
-                                                                key={`${p.id}-collection-${colIdx}`}
-                                                                style={{ width: 160, textOverflow: "ellipsis", whiteSpace: "normal" }}
-                                                            >
-                                                                <Badge tone="info">{collItem.title}</Badge>
-                                                            </div>
-                                                        ))}
-
-                                                        {addingCollectionFor === p.id ? (
-                                                            <InlineStack gap="200" blockAlign="center" wrap={false}>
-                                                                <div style={{ minWidth: 220 }}>
-                                                                    <Select
-                                                                        options={collectionOptions.filter(
-                                                                            (opt) =>
-                                                                                !opt.value ||
-                                                                                !(collectionGradeByProductId[p.id] || []).some((c) => c.id === opt.value)
-                                                                        )}
-                                                                        value={addDraftByProductId[p.id]?.collectionId || ""}
-                                                                        onChange={(v) => {
-                                                                            if (!v) return;
-                                                                            const title = gidToTitle.get(String(v)) || "";
-                                                                            const handle = gidToHandle.get(String(v)) || "";
-
-                                                                            setCollectionGradeByProductId((prev) => {
-                                                                                const existing = prev[p.id] || [];
-                                                                                if (existing.some((c) => c.id === v)) return prev;
-                                                                                return {
-                                                                                    ...prev,
-                                                                                    [p.id]: [
-                                                                                        ...existing,
-                                                                                        {
-                                                                                            id: v,
-                                                                                            title: title || String(v),
-                                                                                            handle,
-                                                                                            grade: String(addDraftByProductId[p.id]?.grade ?? ""),
-                                                                                        },
-                                                                                    ],
-                                                                                };
-                                                                            });
-
-                                                                            setAddingCollectionFor(null);
-                                                                            setAddDraftByProductId((prev) => {
-                                                                                const next = { ...prev };
-                                                                                delete next[p.id];
-                                                                                return next;
-                                                                            });
-                                                                        }}
-                                                                    />
-                                                                </div>
-                                                            </InlineStack>
-                                                        ) : (
-                                                            <div style={{ minWidth: 220 }} />
-                                                        )}
-                                                    </BlockStack>
-                                                </IndexTable.Cell>
-
-                                                <IndexTable.Cell>
-                                                    <BlockStack gap="150">
-                                                        <div style={{ width: 140 }}>
-                                                            <TextField
-                                                                label="Grade"
-                                                                labelHidden
-                                                                value={String(p.grade ?? "")}
+                                                {addingCollectionFor === p.id ? (
+                                                    <InlineStack gap="200" blockAlign="center" wrap={false}>
+                                                        <div style={{ minWidth: 220 }}>
+                                                            <Select
+                                                                options={collectionOptions.filter(
+                                                                    (opt) =>
+                                                                        !opt.value ||
+                                                                        !(collectionGradeByProductId[p.id] || []).some((c) => c.id === opt.value)
+                                                                )}
+                                                                value={addDraftByProductId[p.id]?.collectionId || ""}
                                                                 onChange={(v) => {
-                                                                    setCollectionGradeByProductId((prev) => {
-                                                                        const existing = prev[p.id] || [];
-
-                                                                        if (existing.length === 0) {
-                                                                            return prev;
-                                                                        }
-
-                                                                        const updated = existing.map((item) => ({
-                                                                            ...item,
-                                                                            grade: v,
-                                                                        }));
-
-                                                                        return {
-                                                                            ...prev,
-                                                                            [p.id]: updated,
-                                                                        };
-                                                                    });
+                                                                    setAddDraftByProductId((prev) => ({
+                                                                        ...prev,
+                                                                        [p.id]: {
+                                                                            collectionId: v,
+                                                                            grade: prev[p.id]?.grade ?? "",
+                                                                        },
+                                                                    }));
                                                                 }}
-                                                                autoComplete="off"
                                                             />
                                                         </div>
 
-                                                        {addingCollectionFor === p.id ? (
-                                                            <InlineStack gap="200" blockAlign="center" wrap={false}>
-                                                                <div style={{ width: 140 }}>
-                                                                    <TextField
-                                                                        label="Grade"
-                                                                        labelHidden
-                                                                        value={String(addDraftByProductId[p.id]?.grade ?? p.grade ?? "")}
-                                                                        onChange={(v) => {
-                                                                            setAddDraftByProductId((prev) => ({
-                                                                                ...prev,
-                                                                                [p.id]: {
-                                                                                    collectionId: prev[p.id]?.collectionId || "",
-                                                                                    grade: v,
-                                                                                },
-                                                                            }));
-                                                                        }}
-                                                                        autoComplete="off"
-                                                                    />
-                                                                </div>
+                                                        <Button
+                                                            size="slim"
+                                                            variant="primary"
+                                                            onClick={() => {
+                                                                const draft = addDraftByProductId[p.id];
+                                                                const collectionId = String(draft?.collectionId || "").trim();
+                                                                const grade = String(draft?.grade || "").trim();
 
-                                                                <Button
-                                                                    size="slim"
-                                                                    onClick={() => {
-                                                                        setAddingCollectionFor(null);
-                                                                        setAddDraftByProductId((prev) => {
-                                                                            const next = { ...prev };
-                                                                            delete next[p.id];
-                                                                            return next;
-                                                                        });
-                                                                    }}
-                                                                >
-                                                                    Cancel
-                                                                </Button>
-                                                            </InlineStack>
-                                                        ) : (
-                                                            <div style={{ width: 140 }} />
-                                                        )}
-                                                    </BlockStack>
-                                                </IndexTable.Cell>
+                                                                if (!collectionId) return;
 
-                                                <IndexTable.Cell>
-                                                    <div
-                                                        style={{
-                                                            display: "flex",
-                                                            justifyContent: "space-between",
-                                                            alignItems: "center",
-                                                            width: "100%",
-                                                            gap: "12px",
-                                                        }}
-                                                    >
-                                                        {addingCollectionFor !== p.id ? (
-                                                            <Button variant="primary" tone="success" size="slim" onClick={() => setAddingCollectionFor(p.id)}>
-                                                                +
-                                                            </Button>
-                                                        ) : (
-                                                            <div />
-                                                        )}
+                                                                const title = gidToTitle.get(collectionId) || "";
+                                                                const handle = gidToHandle.get(collectionId) || "";
 
-                                                        <Button variant="primary" loading={savingThisRow(p.id)} disabled={!changed} onClick={() => saveRow(p)}>
-                                                            Save
+                                                                setCollectionGradeByProductId((prev) => {
+                                                                    const existing = prev[p.id] || [];
+                                                                    if (existing.some((c) => c.id === collectionId)) return prev;
+
+                                                                    return {
+                                                                        ...prev,
+                                                                        [p.id]: [
+                                                                            ...existing,
+                                                                            {
+                                                                                id: collectionId,
+                                                                                title: title || collectionId,
+                                                                                handle,
+                                                                                grade,
+                                                                            },
+                                                                        ],
+                                                                    };
+                                                                });
+
+                                                                setAddingCollectionFor(null);
+                                                                setAddDraftByProductId((prev) => {
+                                                                    const next = { ...prev };
+                                                                    delete next[p.id];
+                                                                    return next;
+                                                                });
+                                                            }}
+                                                        >
+                                                            Add
                                                         </Button>
-                                                    </div>
-                                                </IndexTable.Cell>
-                                            </IndexTable.Row>
-                                        );
-                                    })}
-                                </IndexTable>
 
-                                <InlineStack align="space-between">
-                                    <Pagination
-                                        hasPrevious={!searchQuery && !!after}
-                                        onPrevious={() => {
-                                            window.location.href = window.location.pathname;
-                                        }}
-                                        hasNext={!searchQuery && hasNextPage}
-                                        onNext={() => {
-                                            const u = new URL(window.location.href);
-                                            u.searchParams.set("after", endCursor);
-                                            window.location.href = u.toString();
-                                        }}
-                                    />
-                                    <Text as="span" tone="subdued">
-                                        Showing {filteredProducts.length} of {products.length} products
-                                    </Text>
-                                </InlineStack>
-                            </BlockStack>
-                        </div>
-                    </Card>
-                </Layout.Section>
-            </Layout>
-        </Page>
+                                                        <Button
+                                                            size="slim"
+                                                            onClick={() => {
+                                                                setAddingCollectionFor(null);
+                                                                setAddDraftByProductId((prev) => {
+                                                                    const next = { ...prev };
+                                                                    delete next[p.id];
+                                                                    return next;
+                                                                });
+                                                            }}
+                                                        >
+                                                            Cancel
+                                                        </Button>
+                                                    </InlineStack>
+                                                ) : null}
+                                            </BlockStack>
+                                        </IndexTable.Cell>
+
+                                        <IndexTable.Cell>
+                                            <BlockStack gap="150">
+                                                {allowedCollections.length === 0 && addingCollectionFor !== p.id && (
+                                                    <Text tone="subdued">—</Text>
+                                                )}
+
+                                                {allowedCollections.map((collItem, colIdx) => (
+                                                    <div key={`${p.id}-grade-${colIdx}`} style={{ width: 140 }}>
+                                                        <TextField
+                                                            label={`Grade for ${collItem.title}`}
+                                                            labelHidden
+                                                            value={String(collItem.grade ?? "")}
+                                                            onChange={(v) => {
+                                                                setCollectionGradeByProductId((prev) => {
+                                                                    const existing = prev[p.id] || [];
+                                                                    const updated = existing.map((item, idx) =>
+                                                                        idx === colIdx ? { ...item, grade: v } : item
+                                                                    );
+
+                                                                    return {
+                                                                        ...prev,
+                                                                        [p.id]: updated,
+                                                                    };
+                                                                });
+                                                            }}
+                                                            autoComplete="off"
+                                                        />
+                                                    </div>
+                                                ))}
+
+                                                {addingCollectionFor === p.id ? (
+                                                    <div style={{ width: 140 }}>
+                                                        <TextField
+                                                            label="New collection grade"
+                                                            labelHidden
+                                                            value={String(addDraftByProductId[p.id]?.grade ?? "")}
+                                                            onChange={(v) => {
+                                                                setAddDraftByProductId((prev) => ({
+                                                                    ...prev,
+                                                                    [p.id]: {
+                                                                        collectionId: prev[p.id]?.collectionId || "",
+                                                                        grade: v,
+                                                                    },
+                                                                }));
+                                                            }}
+                                                            autoComplete="off"
+                                                        />
+                                                    </div>
+                                                ) : null}
+                                            </BlockStack>
+                                        </IndexTable.Cell>
+
+                                        <IndexTable.Cell>
+                                            <div
+                                                style={{
+                                                    display: "flex",
+                                                    justifyContent: "space-between",
+                                                    alignItems: "center",
+                                                    width: "100%",
+                                                    gap: "12px",
+                                                }}
+                                            >
+                                                {addingCollectionFor !== p.id ? (
+                                                    <Button variant="primary" tone="success" size="slim" onClick={() => setAddingCollectionFor(p.id)}>
+                                                        +
+                                                    </Button>
+                                                ) : (
+                                                    <div />
+                                                )}
+
+                                                <Button variant="primary" loading={savingThisRow(p.id)} disabled={!changed} onClick={() => saveRow(p)}>
+                                                    Save
+                                                </Button>
+                                            </div>
+                                        </IndexTable.Cell>
+                                    </IndexTable.Row>
+                                );
+                            })}
+                        </IndexTable>
+
+                        <InlineStack align="space-between">
+                            <Pagination
+                                hasPrevious={!searchQuery && !selectedCollectionId && !!after}
+                                onPrevious={() => {
+                                    window.location.href = window.location.pathname;
+                                }}
+                                hasNext={!searchQuery && !selectedCollectionId && hasNextPage}
+                                onNext={() => {
+                                    const u = new URL(window.location.href);
+                                    u.searchParams.set("after", endCursor);
+                                    window.location.href = u.toString();
+                                }}
+                            />
+                            <Text as="span" tone="subdued">
+                                Showing {filteredProducts.length} of {products.length} products
+                            </Text>
+                        </InlineStack>
+                    </BlockStack>
+                </div>
+            </Card>
+        </Layout.Section>
+            </Layout >
+        </Page >
     );
 }
 
