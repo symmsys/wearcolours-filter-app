@@ -160,6 +160,41 @@ async function fetchAllCollections(admin) {
     return all;
 }
 
+async function fetchAgeSizeRangeMap(supabase, handles = []) {
+    try {
+        let query = supabase
+            .from(MASTER_TABLE)
+            .select('"Handle","Age Size Range"');
+
+        if (Array.isArray(handles) && handles.length > 0) {
+            query = query.in("Handle", handles);
+        }
+
+        const { data, error } = await query;
+        if (error) {
+            console.error("Error fetching Age Size Range:", error);
+            return {};
+        }
+
+        const map = {};
+
+        for (const row of data || []) {
+            const handle = cleanText(row?.Handle).toLowerCase();
+            if (!handle) continue;
+
+            // keep first non-empty value
+            if (!map[handle]) {
+                map[handle] = cleanText(row?.["Age Size Range"]);
+            }
+        }
+
+        return map;
+    } catch (err) {
+        console.error("fetchAgeSizeRangeMap error:", err);
+        return {};
+    }
+}
+
 async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50, after = null, search = "" } = {}) {
     const searchText = String(search || "").trim();
 
@@ -202,6 +237,12 @@ async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50
                 endCursor: null,
             };
         }
+
+        const searchHandles = matchedHandles
+            .map((entry) => cleanText(entry.handle))
+            .filter(Boolean);
+
+        const ageSizeRangeMap = await fetchAgeSizeRangeMap(supabase, searchHandles);
 
         const products = [];
 
@@ -266,6 +307,7 @@ async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50
                 size: collectArray("size"),
                 size_type: firstValue("size type"),
                 size_range: firstValue("size range"),
+                age_size_range: ageSizeRangeMap[cleanText(p.handle).toLowerCase()] || "",
                 collectionId: firstCol?.id || "",
                 collectionTitle: firstCol?.title || "",
                 collectionHandle: firstCol?.handle || "",
@@ -351,6 +393,12 @@ async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50
     const { data: savedData, error: fetchErr } = await supabase.from(EXTERNAL_TABLE).select("*");
     if (fetchErr) console.error("Error fetching from Supabase:", fetchErr);
 
+    const allProductHandles = items
+        .map((item) => cleanText(item.handle))
+        .filter(Boolean);
+
+    const ageSizeRangeMap = await fetchAgeSizeRangeMap(supabase, allProductHandles);
+
     const collectionsByProductId = {};
     if (savedData && Array.isArray(savedData)) {
         for (const record of savedData) {
@@ -369,16 +417,24 @@ async function fetchProductsWithGradeAndCollection(admin, supabase, { first = 50
 
     const mergedItems = items.map((item) => {
         const savedCollections = collectionsByProductId[item.id] || [];
+        const ageSizeRange = ageSizeRangeMap[cleanText(item.handle).toLowerCase()] || "";
+
         if (savedCollections.length > 0) {
             return {
                 ...item,
+                age_size_range: ageSizeRange,
                 collectionId: savedCollections[0]?.id || "",
                 collectionTitle: savedCollections[0]?.title || "",
                 collectionHandle: savedCollections[0]?.handle || "",
                 savedCollections,
             };
         }
-        return { ...item, savedCollections: [] };
+
+        return {
+            ...item,
+            age_size_range: ageSizeRange,
+            savedCollections: [],
+        };
     });
 
     return {
@@ -1072,7 +1128,7 @@ export default function GradeCollectionPage() {
         setCollectionGradeByProductId(cg);
     }, [products]);
 
-    const headings = useMemo(() => [{ title: "Product" }, { title: "Collections and grade" }, { title: "Action" }], []);
+    const headings = useMemo(() => [{ title: "Product" }, { title: "Age size range" }, { title: "Collections and grade" }, { title: "Action" }], []);
 
     const filteredProducts = products || [];
 
@@ -1514,6 +1570,12 @@ export default function GradeCollectionPage() {
                                                             <Text as="span">{p.title}</Text>
                                                         </BlockStack>
                                                     </InlineStack>
+                                                </IndexTable.Cell>
+
+                                                <IndexTable.Cell>
+                                                    <Text as="span" tone={p.age_size_range ? "base" : "subdued"}>
+                                                        {p.age_size_range || ""}
+                                                    </Text>
                                                 </IndexTable.Cell>
 
                                                 <IndexTable.Cell>
