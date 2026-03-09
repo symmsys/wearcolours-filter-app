@@ -1161,6 +1161,7 @@ export default function GradeCollectionPage() {
 
     // Track if we're currently searching (not filtering)
     const [isSearchLoading, setIsSearchLoading] = useState(false);
+    const [isCollectionFilterLoading, setIsCollectionFilterLoading] = useState(false);
 
     const saveError = fetcher.data?.ok === false ? fetcher.data.error : null;
 
@@ -1508,9 +1509,15 @@ export default function GradeCollectionPage() {
         if (trimmed === initialTrimmed && selectedTrimmed === initialSelectedTrimmed) return;
 
         const timer = setTimeout(() => {
-            // Set search loading only if search query changed
-            if (trimmed !== initialTrimmed) {
+            const searchChanged = trimmed !== initialTrimmed;
+            const collectionChanged = selectedTrimmed !== initialSelectedTrimmed;
+
+            if (searchChanged) {
                 setIsSearchLoading(true);
+            }
+
+            if (collectionChanged) {
+                setIsCollectionFilterLoading(true);
             }
 
             const params = new URLSearchParams();
@@ -1531,13 +1538,13 @@ export default function GradeCollectionPage() {
         }, 400);
 
         return () => clearTimeout(timer);
-
     }, [searchQuery, selectedCollectionId, initialSearchQuery, initialSelectedCollectionId]);
 
     // Reset search loading when fetcher completes
     useEffect(() => {
         if (searchFetcher.state === "idle") {
             setIsSearchLoading(false);
+            setIsCollectionFilterLoading(false);
         }
     }, [searchFetcher.state]);
 
@@ -1736,6 +1743,11 @@ export default function GradeCollectionPage() {
       html {
         scrollbar-gutter: stable;
       }
+
+      @keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
     `}</style>
                                     </BlockStack>
                                 </Card>
@@ -1765,14 +1777,38 @@ export default function GradeCollectionPage() {
                                         />
                                     </div>
 
-                                    <div style={{ width: 280 }}>
-                                        <Select
-                                            label="Filter by collection"
-                                            labelHidden
-                                            options={allowedCollectionFilterOptions}
-                                            value={selectedCollectionId}
-                                            onChange={setSelectedCollectionId}
-                                        />
+                                    <div
+                                        style={{
+                                            width: 280,
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: 8,
+                                        }}
+                                    >
+                                        <div style={{ flex: 1 }}>
+                                            <Select
+                                                label="Filter by collection"
+                                                labelHidden
+                                                options={allowedCollectionFilterOptions}
+                                                value={selectedCollectionId}
+                                                onChange={setSelectedCollectionId}
+                                            />
+                                        </div>
+
+                                        {isCollectionFilterLoading ? (
+                                            <div
+                                                style={{
+                                                    width: 20,
+                                                    height: 20,
+                                                    border: "2px solid #d1d5db",
+                                                    borderTop: "2px solid #111827",
+                                                    borderRadius: "50%",
+                                                    animation: "spin 0.8s linear infinite",
+                                                    flexShrink: 0,
+                                                    marginTop: 2,
+                                                }}
+                                            />
+                                        ) : null}
                                     </div>
                                 </div>
 
