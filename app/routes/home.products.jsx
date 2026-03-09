@@ -1,4 +1,4 @@
-// app/routes/app._index.jsx
+// app/routes/home.products.jsx
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useFetcher, useLoaderData } from "react-router";
@@ -944,6 +944,9 @@ export default function GradeCollectionPage() {
     const [syncOffset, setSyncOffset] = useState(0);
     const [autoSyncOn, setAutoSyncOn] = useState(false);
     const syncLimit = 50;
+    const [waveFrozen, setWaveFrozen] = useState(false);
+    const [waveBgPos, setWaveBgPos] = useState("0px 0px");
+    const waveRef = useRef(null);
 
     // Only show FINAL report when done
     const [finalReport, setFinalReport] = useState(null);
@@ -1045,6 +1048,23 @@ export default function GradeCollectionPage() {
         }
     }, [syncSummary, syncRunTotals, syncDone]);
 
+    useEffect(() => {
+        if (displayPct >= 100 && !waveFrozen) {
+            const el = waveRef.current;
+            if (el) {
+                const computed = window.getComputedStyle(el);
+                const bgPos = computed.backgroundPosition || "0px 0px";
+                setWaveBgPos(bgPos);
+            }
+            setWaveFrozen(true);
+        }
+
+        if (displayPct < 100 && waveFrozen) {
+            setWaveFrozen(false);
+            setWaveBgPos("0px 0px");
+        }
+    }, [displayPct, waveFrozen]);
+
     // detect if auto-sync stops unexpectedly (no response/data)
     useEffect(() => {
         if (!autoSyncOn) {
@@ -1128,9 +1148,20 @@ export default function GradeCollectionPage() {
         setCollectionGradeByProductId(cg);
     }, [products]);
 
-    const headings = useMemo(() => [{ title: "Product" }, { title: "Age size range" }, { title: "Collections and grade" }, { title: "Action" }], []);
+    const headings = useMemo(() => [{ title: "Product" }, { title: "Age size range" }, { title: "Collection" },
+    { title: "Grade" }, { title: "Action" }], []);
 
     const filteredProducts = products || [];
+
+    function getAllowedCollectionsForProduct(productId) {
+        const all = collectionGradeByProductId[productId] || [];
+
+        const allowed = all.filter((c) =>
+            ALLOWED_COLLECTION_IDS.has(String(c.id))
+        );
+
+        return allowed;
+    }
 
     // progress
     const totalForUI = syncSummary?.masterTotal ?? masterTotal;
@@ -1425,7 +1456,11 @@ export default function GradeCollectionPage() {
                                             {/* Fill width animates with progress */}
                                             <div className="waveProgress__fill" style={{ width: `${displayPct}%` }}>
                                                 {/* The moving wave layer */}
-                                                <div className="waveProgress__wave" />
+                                                <div
+                                                    ref={waveRef}
+                                                    className={`waveProgress__wave ${waveFrozen ? "waveProgress__wave--frozen" : ""}`}
+                                                    style={waveFrozen ? { backgroundPosition: waveBgPos } : undefined}
+                                                />
                                             </div>
 
                                             {/* Percentage text (BLACK) */}
@@ -1494,6 +1529,10 @@ export default function GradeCollectionPage() {
         filter: blur(0.2px);
       }
 
+      .waveProgress__wave--frozen{
+  animation: none;
+}
+
       @keyframes waveMove{
         from { background-position: 0 0; }
         to   { background-position: 160px 0; }
@@ -1537,6 +1576,9 @@ export default function GradeCollectionPage() {
                                 >
                                     {filteredProducts.map((p, idx) => {
                                         const currentCollectionGrades = collectionGradeByProductId[p.id] || [];
+                                        const allowedCollections = currentCollectionGrades.filter((c) =>
+                                            ALLOWED_COLLECTION_IDS.has(String(c.id))
+                                        );
                                         const originalCollectionGrades =
                                             p.savedCollections && p.savedCollections.length > 0
                                                 ? p.savedCollections
@@ -1580,53 +1622,18 @@ export default function GradeCollectionPage() {
 
                                                 <IndexTable.Cell>
                                                     <BlockStack gap="150">
-                                                        {(collectionGradeByProductId[p.id] || []).map((collItem, colIdx) => {
-                                                            const deletingThis =
-                                                                isDeleting &&
-                                                                deleteFetcher.formData?.get("productId") === p.id &&
-                                                                deleteFetcher.formData?.get("collectionId") === collItem.id;
+                                                        {allowedCollections.length === 0 && addingCollectionFor !== p.id && (
+                                                            <Text tone="subdued">—</Text>
+                                                        )}
 
-                                                            return (
-                                                                <InlineStack
-                                                                    key={`${p.id}-collgrade-${colIdx}`}
-                                                                    gap="200"
-                                                                    blockAlign="center"
-                                                                    wrap={false}
-                                                                >
-                                                                    <div style={{ width: 160, textOverflow: "ellipsis", whiteSpace: "normal" }}>
-                                                                        <Badge tone="info">{collItem.title}</Badge>
-                                                                    </div>
-
-                                                                    <div style={{ width: 140 }}>
-                                                                        <TextField
-                                                                            label="Grade"
-                                                                            labelHidden
-                                                                            value={String(collItem.grade ?? "")}
-                                                                            onChange={(v) => {
-                                                                                setCollectionGradeByProductId((prev) => {
-                                                                                    const existing = prev[p.id] || [];
-                                                                                    const updated = [...existing];
-                                                                                    updated[colIdx] = { ...updated[colIdx], grade: v };
-                                                                                    return { ...prev, [p.id]: updated };
-                                                                                });
-                                                                            }}
-                                                                            autoComplete="off"
-                                                                        />
-                                                                    </div>
-
-                                                                    <Button
-                                                                        size="slim"
-                                                                        variant="plain"
-                                                                        icon={DeleteIcon}
-                                                                        tone="critical"
-                                                                        loading={deletingThis}
-                                                                        disabled={savingThisRow(p.id)}
-                                                                        accessibilityLabel={`Remove ${collItem.title}`}
-                                                                        onClick={() => deleteOneCollection(p.id, collItem.id, colIdx)}
-                                                                    />
-                                                                </InlineStack>
-                                                            );
-                                                        })}
+                                                        {allowedCollections.map((collItem, colIdx) => (
+                                                            <div
+                                                                key={`${p.id}-collection-${colIdx}`}
+                                                                style={{ width: 160, textOverflow: "ellipsis", whiteSpace: "normal" }}
+                                                            >
+                                                                <Badge tone="info">{collItem.title}</Badge>
+                                                            </div>
+                                                        ))}
 
                                                         {addingCollectionFor === p.id ? (
                                                             <InlineStack gap="200" blockAlign="center" wrap={false}>
@@ -1669,12 +1676,50 @@ export default function GradeCollectionPage() {
                                                                         }}
                                                                     />
                                                                 </div>
+                                                            </InlineStack>
+                                                        ) : (
+                                                            <div style={{ minWidth: 220 }} />
+                                                        )}
+                                                    </BlockStack>
+                                                </IndexTable.Cell>
 
+                                                <IndexTable.Cell>
+                                                    <BlockStack gap="150">
+                                                        <div style={{ width: 140 }}>
+                                                            <TextField
+                                                                label="Grade"
+                                                                labelHidden
+                                                                value={String(p.grade ?? "")}
+                                                                onChange={(v) => {
+                                                                    setCollectionGradeByProductId((prev) => {
+                                                                        const existing = prev[p.id] || [];
+
+                                                                        if (existing.length === 0) {
+                                                                            return prev;
+                                                                        }
+
+                                                                        const updated = existing.map((item) => ({
+                                                                            ...item,
+                                                                            grade: v,
+                                                                        }));
+
+                                                                        return {
+                                                                            ...prev,
+                                                                            [p.id]: updated,
+                                                                        };
+                                                                    });
+                                                                }}
+                                                                autoComplete="off"
+                                                            />
+                                                        </div>
+
+                                                        {addingCollectionFor === p.id ? (
+                                                            <InlineStack gap="200" blockAlign="center" wrap={false}>
                                                                 <div style={{ width: 140 }}>
                                                                     <TextField
                                                                         label="Grade"
                                                                         labelHidden
-                                                                        value={String(addDraftByProductId[p.id]?.grade ?? "")}
+                                                                        value={String(addDraftByProductId[p.id]?.grade ?? p.grade ?? "")}
                                                                         onChange={(v) => {
                                                                             setAddDraftByProductId((prev) => ({
                                                                                 ...prev,
@@ -1703,10 +1748,7 @@ export default function GradeCollectionPage() {
                                                                 </Button>
                                                             </InlineStack>
                                                         ) : (
-                                                            <InlineStack gap="200" blockAlign="center" wrap={false}>
-                                                                <div style={{ minWidth: 220 }} />
-                                                                <div style={{ minWidth: 220 }} />
-                                                            </InlineStack>
+                                                            <div style={{ width: 140 }} />
                                                         )}
                                                     </BlockStack>
                                                 </IndexTable.Cell>
