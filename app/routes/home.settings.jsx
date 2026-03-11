@@ -43,6 +43,7 @@ const SORT_OPTIONS = [
   { label: "Best Selling", value: "BEST_SELLING" },
   { label: "Created (Newest)", value: "CREATED_DESC" },
   { label: "Created (Oldest)", value: "CREATED_ASC" },
+  { label: "Manual", value: "MANUAL" },
 ];
 
 const DEFAULT_SORT = "TITLE_ASC";

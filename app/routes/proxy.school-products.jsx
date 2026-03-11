@@ -160,6 +160,8 @@ export async function loader({ request }) {
                     headers: {
                         "Content-Type": "application/json; charset=utf-8",
                         "Cache-Control": "public, max-age=30, stale-while-revalidate=300",
+                        Pragma: "no-cache",
+                        Expires: "0",
                     },
                 }
             );
@@ -239,6 +241,8 @@ export async function loader({ request }) {
                 headers: {
                     "Content-Type": "application/json; charset=utf-8",
                     "Cache-Control": "public, max-age=30, stale-while-revalidate=300",
+                    Pragma: "no-cache",
+                    Expires: "0",
                 },
             }
         );
