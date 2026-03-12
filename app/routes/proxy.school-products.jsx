@@ -1,20 +1,14 @@
 // app/routes/apps.school-products.jsx
 // App Proxy endpoint: /apps/school-products
-//
-// TITLE-ONLY SORTING VERSION (NO NEW COLUMNS / NO EXTRA DATA)
-// - Reads default_sort_order from settings using collection_id
-// - Fetches rows from product_grade_collection by collection_id
-// - De-dupes by product_handle
-// - Sorts ONLY by product_title (A→Z / Z→A)
-// - Returns handles in that sorted order
 
 import { authenticate } from "../shopify.server";
 import { getSupabaseAdmin } from "../supabase.server";
 
 const EXTERNAL_TABLE = "product_grade_collection";
 const SETTINGS_TABLE = "settings";
+const MANUAL_SORT_TABLE = "product_sort_order";
 
-const DEFAULT_SORT = "TITLE_ASC";
+const DEFAULT_SORT = "MANUAL";
 
 /* ---------------- Helpers ---------------- */
 
@@ -30,8 +24,7 @@ function clean(v) {
 }
 
 /**
- * Get Shopify collection id from handle (we only use Shopify for THIS lookup)
- * Because your URL provides collection_handle, but your DB is keyed by collection_id.
+ * Get Shopify collection id from handle
  */
 async function fetchCollectionIdByHandle(admin, handle) {
     const resp = await admin.graphql(
@@ -53,7 +46,7 @@ async function fetchCollectionIdByHandle(admin, handle) {
 }
 
 /**
- * Read sort order from settings table by collection_id ONLY
+ * Read sort order from settings table by collection_id
  */
 async function getCollectionSortOrder(supabase, collectionId) {
     if (!collectionId) return DEFAULT_SORT;
@@ -75,10 +68,70 @@ async function getCollectionSortOrder(supabase, collectionId) {
         "PRICE_DESC",
         "CREATED_ASC",
         "CREATED_DESC",
-        "BEST_SELLING"
+        "BEST_SELLING",
+        "MANUAL",
     ]);
 
     return ALLOWED_SORTS.has(v) ? v : DEFAULT_SORT;
+}
+
+/**
+ * Fetch manual sort row for one collection + grade context
+ */
+async function getManualSortRow(supabase, collectionId, grade = "") {
+    const safeCollectionId = clean(collectionId);
+    const safeGrade = clean(grade);
+
+    if (!safeCollectionId) return null;
+
+    const { data, error } = await supabase
+        .from(MANUAL_SORT_TABLE)
+        .select("school_id, grade, product_order, grade_override, status")
+        .eq("school_id", safeCollectionId)
+        .eq("grade", safeGrade)
+        .eq("status", 1)
+        .maybeSingle();
+
+    if (error) {
+        throw new Error(error.message || "Failed to fetch manual sort row");
+    }
+
+    return data || null;
+}
+
+/**
+ * Resolve manual sort row:
+ * 1) if grade selected, try collection + selected grade
+ * 2) fallback to collection + ""
+ */
+async function resolveManualSortRow(supabase, collectionId, gradeSelected = "") {
+    const safeGrade = clean(gradeSelected);
+
+    if (safeGrade) {
+        const gradeRow = await getManualSortRow(supabase, collectionId, safeGrade);
+        if (gradeRow) return gradeRow;
+    }
+
+    return await getManualSortRow(supabase, collectionId, "");
+}
+
+/**
+ * Reorder current valid handles using saved manual handles
+ * - keeps only valid handles
+ * - appends missing/new valid handles at the end
+ */
+function applyManualOrder(validHandles, manualHandles) {
+    const safeValidHandles = Array.isArray(validHandles) ? validHandles : [];
+    const safeManualHandles = Array.isArray(manualHandles) ? manualHandles : [];
+
+    const validSet = new Set(safeValidHandles);
+
+    const ordered = safeManualHandles.filter((h) => validSet.has(clean(h)));
+    const orderedSet = new Set(ordered);
+
+    const missing = safeValidHandles.filter((h) => !orderedSet.has(h));
+
+    return [...ordered, ...missing];
 }
 
 /* ---------------- Proxy Loader ---------------- */
@@ -112,10 +165,10 @@ export async function loader({ request }) {
             });
         }
 
-        // 2) read sort preference from settings (by collection_id)
+        // 2) read sort preference from settings
         const sortOrder = await getCollectionSortOrder(supabase, collectionId);
 
-        // 3) fetch rows from product_grade_collection (by collection_id)
+        // 3) fetch rows from product_grade_collection
         let query = supabase
             .from(EXTERNAL_TABLE)
             .select("*")
@@ -137,12 +190,13 @@ export async function loader({ request }) {
 
         const safeRows = rows || [];
 
-        // PRODUCT MODE (grades for one product)
+        // PRODUCT MODE
         if (productHandle) {
             const gradeSet = new Set();
             for (const r of safeRows) {
                 for (const g of splitGrades(r.grade)) gradeSet.add(g);
             }
+
             const grades = Array.from(gradeSet).sort((a, b) => Number(a) - Number(b));
 
             return new Response(
@@ -181,17 +235,17 @@ export async function loader({ request }) {
             ? safeRows.filter((r) => splitGrades(r.grade).includes(gradeSelected))
             : safeRows;
 
-        // build gradeByHandleSet (so you can show grades per handle)
+        // build gradeByHandleSet
         const gradeByHandleSet = {};
         for (const r of filteredRows) {
             const h = clean(r.product_handle);
             if (!h) continue;
+
             if (!gradeByHandleSet[h]) gradeByHandleSet[h] = new Set();
             for (const g of splitGrades(r.grade)) gradeByHandleSet[h].add(g);
         }
 
         // de-dupe to one row per handle
-        // if multiple rows exist per handle, keep the one that has a product_title
         const rowByHandle = new Map();
         for (const r of filteredRows) {
             const h = clean(r.product_handle);
@@ -206,17 +260,22 @@ export async function loader({ request }) {
             const existingTitle = clean(existing?.product_title);
             const newTitle = clean(r?.product_title);
 
-            // Prefer the row that actually has a title
             if (!existingTitle && newTitle) rowByHandle.set(h, r);
         }
 
         const uniqueRows = Array.from(rowByHandle.values());
-        const handles = uniqueRows
+
+        let handles = uniqueRows
             .map((r) => clean(r.product_handle))
             .filter(Boolean);
 
+        // APPLY MANUAL ORDER ONLY WHEN SETTINGS SAY MANUAL
+        if (sortOrder === "MANUAL") {
+            const manualRow = await resolveManualSortRow(supabase, collectionId, gradeSelected);
 
-
+            const manualHandles = manualRow?.product_order?.handles || [];
+            handles = applyManualOrder(handles, manualHandles);
+        }
 
         const gradeByHandle = {};
         for (const h of handles) {
