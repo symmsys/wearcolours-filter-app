@@ -178,7 +178,7 @@ async function fetchProductsByHandles(admin, handles) {
                 handle
                 title
                 featuredImage {
-                  url
+                  url(transform: { maxWidth: 120, maxHeight: 120 })
                   altText
                 }
               }
@@ -575,6 +575,10 @@ function SortableRow({ product, collectionLabel, gradeLabel, dragEnabled }) {
                             <img
                                 src={product.imageUrl}
                                 alt={product.imageAlt}
+                                loading="lazy"
+                                decoding="async"
+                                width="56"
+                                height="56"
                                 style={{ width: "100%", height: "100%", objectFit: "cover" }}
                             />
                         ) : null}
@@ -584,9 +588,7 @@ function SortableRow({ product, collectionLabel, gradeLabel, dragEnabled }) {
                         <Text as="span" variant="bodyMd" fontWeight="medium">
                             {product.title}
                         </Text>
-                        <Text as="span" tone="subdued">
-                            {product.handle}
-                        </Text>
+
                     </BlockStack>
                 </InlineStack>
             </td>
@@ -650,10 +652,7 @@ export default function ManualSortRoute() {
     const [initialHandles, setInitialHandles] = useState([]);
     const saveHandledRef = useRef(false);
 
-    const selectedCollection = useMemo(
-        () => (collections || []).find((c) => c.value === selectedCollectionId) || null,
-        [collections, selectedCollectionId]
-    );
+
 
     const allProductsByHandle = useMemo(() => {
         const map = {};
@@ -686,7 +685,16 @@ export default function ManualSortRoute() {
             for (const g of splitGrades(gradeCsv)) gradeSet.add(g);
         }
 
-        return Array.from(gradeSet).sort((a, b) => String(a).localeCompare(String(b)));
+        return Array.from(gradeSet).sort((a, b) => {
+            const na = Number(a);
+            const nb = Number(b);
+
+            if (!Number.isNaN(na) && !Number.isNaN(nb)) {
+                return na - nb;
+            }
+
+            return String(a).localeCompare(String(b));
+        });
     }, [products, selectedCollectionId]);
 
     useEffect(() => {
