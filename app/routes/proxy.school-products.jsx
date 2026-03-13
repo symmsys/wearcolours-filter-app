@@ -100,19 +100,33 @@ async function getManualSortRow(supabase, collectionId, grade = "") {
 }
 
 /**
- * Resolve manual sort row:
- * 1) if grade selected, try collection + selected grade
- * 2) fallback to collection + ""
+ * Resolve which manual order should be used
+ *
+ * Rule:
+ * - collection-level row (grade="") is default order
+ * - grade-specific row is used only if grade_override === true
  */
 async function resolveManualSortRow(supabase, collectionId, gradeSelected = "") {
     const safeGrade = clean(gradeSelected);
 
-    if (safeGrade) {
-        const gradeRow = await getManualSortRow(supabase, collectionId, safeGrade);
-        if (gradeRow) return gradeRow;
+    // collection-level row is always the default order
+    const collectionRow = await getManualSortRow(supabase, collectionId, "");
+
+    // if no grade selected, use collection default only
+    if (!safeGrade) {
+        return collectionRow;
     }
 
-    return await getManualSortRow(supabase, collectionId, "");
+    // if grade selected, check grade-specific row
+    const gradeRow = await getManualSortRow(supabase, collectionId, safeGrade);
+
+    // use grade row only when override is true
+    if (gradeRow && gradeRow.grade_override === true) {
+        return gradeRow;
+    }
+
+    // otherwise keep collection-level default order
+    return collectionRow;
 }
 
 /**

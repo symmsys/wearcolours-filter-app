@@ -1,4 +1,4 @@
-// app/routes/home.sort.jsx
+// app/routes/home.product-sort.jsx
 
 import { useEffect, useMemo, useState, useRef } from "react";
 import { useFetcher, useLoaderData } from "react-router";
@@ -88,12 +88,14 @@ function resolveHandlesForContext({
     selectedCollectionId,
     selectedGrade,
 }) {
+    // Get the fallback handles (default order)
     const fallbackHandles = getContextHandles(
         products,
         selectedCollectionId,
         selectedGrade
     );
 
+    // If no collection is selected, return default order
     if (!selectedCollectionId) {
         return {
             handles: fallbackHandles,
@@ -101,19 +103,36 @@ function resolveHandlesForContext({
         };
     }
 
+    // Generate the key for the selected collection + grade combination
     const key = sortKey(selectedCollectionId, selectedGrade || "");
+
+    // Check if saved sort exists for collection + grade
     const saved = savedSorts[key];
 
-    if (Array.isArray(saved?.product_order?.handles) && saved.product_order.handles.length) {
+    // If no saved order for collection + grade, fallback to collection + "" (empty grade)
+    if (!saved || !Array.isArray(saved?.product_order?.handles) || !saved.product_order.handles.length) {
+        const fallbackEmptyGradeKey = sortKey(selectedCollectionId, "");  // Fallback to collection + empty grade
+
+        const savedEmptyGrade = savedSorts[fallbackEmptyGradeKey];  // Check for saved sort for collection + ""
+
+        if (savedEmptyGrade) {
+            return {
+                handles: mergeSavedOrder(fallbackHandles, savedEmptyGrade.product_order.handles),
+                gradeOverride: !!savedEmptyGrade.grade_override,
+            };
+        }
+
+        // If no saved order for collection + "" (empty grade), return the default fallback order
         return {
-            handles: mergeSavedOrder(fallbackHandles, saved.product_order.handles),
-            gradeOverride: !!saved.grade_override,
+            handles: fallbackHandles,
+            gradeOverride: false,
         };
     }
 
+    // If saved order exists for collection + grade, use it
     return {
-        handles: fallbackHandles,
-        gradeOverride: false,
+        handles: mergeSavedOrder(fallbackHandles, saved.product_order.handles),
+        gradeOverride: !!saved.grade_override,
     };
 }
 
@@ -264,10 +283,7 @@ export async function loader({ request }) {
         const { admin } = await authenticate.admin(request);
         const supabase = getSupabaseAdmin();
 
-
-
         const shopId = await fetchShopId(admin);
-
 
         const { data: mappingRows, error: mappingError } = await supabase
             .from("product_grade_collection")
@@ -397,7 +413,6 @@ export async function loader({ request }) {
             }
         }
 
-
         return Response.json({
             ok: true,
             shopId,
@@ -519,7 +534,7 @@ export async function action({ request }) {
    row component
 ========================= */
 
-function SortableRow({ product, collectionLabel, gradeLabel, dragEnabled }) {
+function SortableRow({ product, collectionLabel, gradeLabel, dragEnabled, index }) {
     const {
         attributes,
         listeners,
@@ -560,7 +575,26 @@ function SortableRow({ product, collectionLabel, gradeLabel, dragEnabled }) {
             </td>
 
             <td style={{ padding: "12px", borderBottom: "1px solid #e1e3e5" }}>
-                <InlineStack gap="300" blockAlign="center">
+                {/* Flexbox container for aligning number, image, and title in a single line */}
+                <div
+                    style={{
+                        display: "flex",
+                        alignItems: "center",  // Vertically center all items
+                        justifyContent: "flex-start",  // Align to the left
+                    }}
+                >
+                    {/* Number in front of the image */}
+                    <span
+                        style={{
+                            fontWeight: "bold",
+                            marginRight: "12px",  // Space between number and image
+                            fontSize: "16px",
+                        }}
+                    >
+                        {index + 1}.
+                    </span>
+
+                    {/* Product image */}
                     <div
                         style={{
                             width: 56,
@@ -568,7 +602,7 @@ function SortableRow({ product, collectionLabel, gradeLabel, dragEnabled }) {
                             borderRadius: 8,
                             overflow: "hidden",
                             background: "#f1f2f3",
-                            flex: "0 0 56px",
+                            flex: "0 0 56px",  // Ensuring the image size stays consistent
                         }}
                     >
                         {product.imageUrl ? (
@@ -579,18 +613,24 @@ function SortableRow({ product, collectionLabel, gradeLabel, dragEnabled }) {
                                 decoding="async"
                                 width="56"
                                 height="56"
-                                style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                                style={{
+                                    width: "100%",
+                                    height: "100%",
+                                    objectFit: "cover",
+                                }}
                             />
                         ) : null}
                     </div>
 
-                    <BlockStack gap="050">
-                        <Text as="span" variant="bodyMd" fontWeight="medium">
-                            {product.title}
-                        </Text>
-
-                    </BlockStack>
-                </InlineStack>
+                    {/* Product title */}
+                    <div style={{ marginLeft: "12px" }}>
+                        <BlockStack gap="050">
+                            <Text as="span" variant="bodyMd" fontWeight="medium">
+                                {product.title}
+                            </Text>
+                        </BlockStack>
+                    </div>
+                </div>
             </td>
 
             <td style={{ padding: "12px", borderBottom: "1px solid #e1e3e5", width: 220 }}>
@@ -650,6 +690,7 @@ export default function ManualSortRoute() {
 
 
     const [initialHandles, setInitialHandles] = useState([]);
+    const [initialGradeOverride, setInitialGradeOverride] = useState(false);
     const saveHandledRef = useRef(false);
 
 
@@ -698,6 +739,12 @@ export default function ManualSortRoute() {
     }, [products, selectedCollectionId]);
 
     useEffect(() => {
+        if (!selectedGrade) {
+            setGradeOverride(false);
+        }
+    }, [selectedGrade]);
+
+    useEffect(() => {
         const timer = setTimeout(() => {
             setSearchText(searchInput.trim().toLowerCase());
             setIsSearching(false);
@@ -715,9 +762,10 @@ export default function ManualSortRoute() {
             selectedGrade,
         });
 
-        setOrderedHandles(resolved.handles);
-        setInitialHandles(resolved.handles);
-        setGradeOverride(resolved.gradeOverride);
+        setOrderedHandles(resolved.handles);  // Set the final order
+        setInitialHandles(resolved.handles);  // Set the initial order for comparison
+        setGradeOverride(resolved.gradeOverride);  // Set grade override based on saved data
+        setInitialGradeOverride(resolved.gradeOverride);  // Set the initial grade override value
     }, [products, savedSorts, selectedCollectionId, selectedGrade]);
 
     useEffect(() => {
@@ -783,6 +831,8 @@ export default function ManualSortRoute() {
     const isDirty = useMemo(() => {
         if (!selectedCollectionId) return false;
 
+        if (gradeOverride !== initialGradeOverride) return true;
+
         if (handlesForCurrentContext.length !== initialHandles.length) return true;
 
         for (let i = 0; i < handlesForCurrentContext.length; i += 1) {
@@ -790,7 +840,13 @@ export default function ManualSortRoute() {
         }
 
         return false;
-    }, [selectedCollectionId, handlesForCurrentContext, initialHandles]);
+    }, [
+        selectedCollectionId,
+        handlesForCurrentContext,
+        initialHandles,
+        gradeOverride,
+        initialGradeOverride,
+    ]);
 
     function handleDragEnd(event) {
         if (!dragEnabled) return;
@@ -798,9 +854,11 @@ export default function ManualSortRoute() {
         const { active, over } = event;
         if (!active?.id || !over?.id) return;
 
-        setOrderedHandles((prev) =>
-            reorderVisibleWithinFull(prev, filteredVisibleHandles, active.id, over.id)
-        );
+        // Update the order of products
+        setOrderedHandles((prev) => {
+            const newOrder = arrayMove(prev, prev.indexOf(active.id), prev.indexOf(over.id));
+            return newOrder;
+        });
     }
 
     function handleSave() {
@@ -883,6 +941,7 @@ export default function ManualSortRoute() {
 
             setOrderedHandles(handlesForSave);
             setInitialHandles(handlesForSave);
+            setInitialGradeOverride(gradeOverride);
         } else if (fetcher.data?.error) {
             saveHandledRef.current = true;
             setMessage(fetcher.data.error);
@@ -918,8 +977,8 @@ export default function ManualSortRoute() {
                                     {fetcher.state !== "idle" ? <Spinner size="small" /> : null}
                                 </InlineStack>
 
-                                <InlineStack gap="300" wrap={false} blockAlign="end">
-                                    <div style={{ minWidth: 260, flex: "1 1 260px" }}>
+                                <InlineStack gap="300" wrap blockAlign="end">
+                                    <div style={{ minWidth: 220, flex: "1 1 280px" }}>
                                         <TextField
                                             label="Search products"
                                             labelHidden
@@ -930,7 +989,7 @@ export default function ManualSortRoute() {
                                         />
                                     </div>
 
-                                    <div style={{ minWidth: 260 }}>
+                                    <div style={{ minWidth: 220, flex: "1 1 260px" }}>
                                         <Select
                                             label="School / Collection"
                                             options={collectionOptions}
@@ -942,7 +1001,7 @@ export default function ManualSortRoute() {
                                         />
                                     </div>
 
-                                    <div style={{ minWidth: 220 }}>
+                                    <div style={{ minWidth: 180, flex: "1 1 220px" }}>
                                         <Select
                                             label="Grade"
                                             options={gradeOptions}
@@ -952,16 +1011,23 @@ export default function ManualSortRoute() {
                                         />
                                     </div>
 
-                                    <div style={{ minWidth: 220, display: "flex", alignItems: "end" }}>
+                                    <div style={{ minWidth: 180, flex: "1 1 220px", display: "flex", alignItems: "end" }}>
                                         <Checkbox
                                             label="Grade override"
                                             checked={gradeOverride}
                                             onChange={setGradeOverride}
-                                            disabled={!selectedCollectionId}
+                                            disabled={!selectedCollectionId || !selectedGrade}
                                         />
                                     </div>
 
-                                    <div style={{ display: "flex", alignItems: "end", marginLeft: "auto" }}>
+                                    <div style={{
+                                        display: "flex",
+                                        alignItems: "end",
+                                        justifyContent: "flex-end",
+                                        flex: "1 1 160px",
+                                        minWidth: 160,
+                                        marginLeft: "auto",
+                                    }}>
                                         <Button
                                             variant="primary"
                                             onClick={handleSave}
@@ -993,25 +1059,25 @@ export default function ManualSortRoute() {
                                         strategy={verticalListSortingStrategy}
                                     >
                                         <div style={{ overflowX: "auto" }}>
-                                            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                                            <table style={{ width: "100%", minWidth: 800, borderCollapse: "collapse" }}>
                                                 <thead>
                                                     <tr style={{ background: "#f6f6f7" }}>
                                                         <th style={{ textAlign: "left", padding: 12, width: 48 }} />
                                                         <th style={{ textAlign: "left", padding: 12 }}>Product</th>
-                                                        <th style={{ textAlign: "left", padding: 12, width: 220 }}>
+                                                        <th style={{ textAlign: "left", padding: 12, width: "150px" }}>
                                                             Age Size Range
                                                         </th>
-                                                        <th style={{ textAlign: "left", padding: 12, width: 220 }}>
+                                                        <th style={{ textAlign: "left", padding: 12, width: "150px" }}>
                                                             Collection
                                                         </th>
-                                                        <th style={{ textAlign: "left", padding: 12, width: 200 }}>
+                                                        <th style={{ textAlign: "left", padding: 12, width: "120px" }}>
                                                             Grade
                                                         </th>
                                                     </tr>
                                                 </thead>
 
                                                 <tbody>
-                                                    {visibleProducts.map((product) => {
+                                                    {visibleProducts.map((product, index) => {
                                                         const collectionLabel = selectedCollectionId
                                                             ? product.collectionMap[selectedCollectionId]?.collectionHandle || ""
                                                             : uniqueStrings(
@@ -1034,6 +1100,7 @@ export default function ManualSortRoute() {
                                                                 collectionLabel={collectionLabel}
                                                                 gradeLabel={gradeLabel}
                                                                 dragEnabled={dragEnabled}
+                                                                index={index}
                                                             />
                                                         );
                                                     })}
