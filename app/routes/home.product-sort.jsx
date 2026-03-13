@@ -978,7 +978,7 @@ export default function ManualSortRoute() {
                                 </InlineStack>
 
                                 <InlineStack gap="300" wrap blockAlign="end">
-                                    <div style={{ minWidth: 220, flex: "1 1 280px" }}>
+                                    <div style={{ minWidth: 220, flex: "1 1 220px" }}>
                                         <TextField
                                             label="Search products"
                                             labelHidden
@@ -989,7 +989,7 @@ export default function ManualSortRoute() {
                                         />
                                     </div>
 
-                                    <div style={{ minWidth: 220, flex: "1 1 260px" }}>
+                                    <div style={{ minWidth: 220, flex: "1 1 220px" }}>
                                         <Select
                                             label="School / Collection"
                                             options={collectionOptions}
@@ -1001,7 +1001,7 @@ export default function ManualSortRoute() {
                                         />
                                     </div>
 
-                                    <div style={{ minWidth: 180, flex: "1 1 220px" }}>
+                                    <div style={{ minWidth: 180, flex: "1 1 180px" }}>
                                         <Select
                                             label="Grade"
                                             options={gradeOptions}
@@ -1011,7 +1011,7 @@ export default function ManualSortRoute() {
                                         />
                                     </div>
 
-                                    <div style={{ minWidth: 180, flex: "1 1 220px", display: "flex", alignItems: "end" }}>
+                                    <div style={{ minWidth: 180, flex: "1 1 180px", display: "flex", alignItems: "end" }}>
                                         <Checkbox
                                             label="Grade override"
                                             checked={gradeOverride}
