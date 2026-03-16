@@ -1,8 +1,8 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "fe9b01697abb03795d38fb4b25025cf4"
+client_id = "SHOPIFY_API_KEY"
 name = "wearcolours-filter-app"
-application_url = "https://hemispherically-unnefarious-winfred.ngrok-free.dev"
+application_url = "app.wearcolours.com"
 embedded = true
 
 [build]
@@ -25,4 +25,4 @@ api_version = "2026-04"
 scopes = "write_products,read_products"
 
 [auth]
-redirect_urls = [ "https://hemispherically-unnefarious-winfred.ngrok-free.dev/api/auth" ]
+redirect_urls = [ "https://app.wearcolours.com/api/auth" ]

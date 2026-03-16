@@ -7,10 +7,13 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { getSupabaseAdmin } from "../supabase.server";
 
+import { DeleteIcon } from "@shopify/polaris-icons";
+
 import {
     Page,
     Layout,
     Card,
+    Icon,
     IndexTable,
     Text,
     TextField,
@@ -202,64 +205,13 @@ async function fetchProductsWithGradeAndCollection(
     /* ---------------- SEARCH MODE (Supabase global search) ---------------- */
 
     if (searchText) {
-
-        let searchQueryBuilder = supabase
-            .from(EXTERNAL_TABLE)
-            .select("shopify_product_id, product_title, product_handle, collection_id")
-            .ilike("product_title", `%${searchText}%`);
-
-        if (collectionId) {
-            searchQueryBuilder = searchQueryBuilder.eq("collection_id", collectionId);
-        }
-
-        const { data: matchedRows, error: searchErr } = await searchQueryBuilder
-            .order("product_title", { ascending: true })
-            .limit(first);
-
-        if (searchErr) throw new Error(searchErr.message);
-
-        const uniqueHandleMap = new Map();
-
-        for (const row of matchedRows || []) {
-            const handle = cleanText(row?.product_handle);
-            if (!handle) continue;
-
-            const key = `${handle.toLowerCase()}::${cleanText(row?.collection_id)}`;
-
-            if (!uniqueHandleMap.has(key)) {
-                uniqueHandleMap.set(key, {
-                    id: row?.shopify_product_id || "",
-                    handle,
-                    title: row?.product_title || "",
-                    collection_id: cleanText(row?.collection_id),
-                });
-            }
-        }
-
-        const matchedHandles = Array.from(uniqueHandleMap.values());
-
-        if (!matchedHandles.length) {
-            return {
-                items: [],
-                hasNextPage: false,
-                endCursor: null,
-            };
-        }
-
-        const searchHandles = matchedHandles
-            .map((entry) => cleanText(entry.handle))
-            .filter(Boolean);
-
-        const ageSizeRangeMap = await fetchAgeSizeRangeMap(supabase, searchHandles);
-
-        const products = [];
-
-        for (const entry of matchedHandles) {
-
-            const res = await admin.graphql(
-                `#graphql
-            query ProductByHandle($handle: String!) {
-              productByHandle(handle: $handle) {
+        const res = await admin.graphql(
+            `#graphql
+        query ProductsSearch($first: Int!, $query: String!) {
+          products(first: $first, query: $query, sortKey: TITLE) {
+            pageInfo { hasNextPage endCursor }
+            edges {
+              node {
                 id
                 title
                 handle
@@ -268,59 +220,136 @@ async function fetchProductsWithGradeAndCollection(
                 variants(first: 250) {
                   edges { node { selectedOptions { name value } } }
                 }
-                collections(first: 1) {
+                collections(first: 50) {
                   edges { node { id title handle } }
                 }
               }
             }
-        `,
-                { variables: { handle: entry.handle } }
-            );
-
-            const json = await parseGraphql(res);
-            const p = json?.data?.productByHandle;
-
-            if (!p?.id) continue;
-
-            const firstCol = p?.collections?.edges?.[0]?.node || null;
-            const variantEdges = p?.variants?.edges || [];
-
-            const collectArray = (optName) => {
-                const vals = [];
-                for (const ve of variantEdges) {
-                    const opts = ve?.node?.selectedOptions || [];
-                    for (const o of opts) {
-                        if (String(o.name || "").toLowerCase() === optName) vals.push(o.value);
-                    }
-                }
-                return Array.from(new Set(vals)).filter(v => v);
-            };
-
-            const firstValue = (optName) => {
-                for (const ve of variantEdges) {
-                    const opts = ve?.node?.selectedOptions || [];
-                    for (const o of opts) {
-                        if (String(o.name || "").toLowerCase() === optName && o.value) return o.value;
-                    }
-                }
-                return null;
-            };
-
-            products.push({
-                id: p.id,
-                title: p.title || "",
-                handle: p.handle || "",
-                grade: p?.metafield?.value || "",
-                imageUrl: p?.featuredImage?.url || "",
-                size: collectArray("size"),
-                size_type: firstValue("size type"),
-                size_range: firstValue("size range"),
-                age_size_range: ageSizeRangeMap[cleanText(p.handle).toLowerCase()] || "",
-                collectionId: firstCol?.id || "",
-                collectionTitle: firstCol?.title || "",
-                collectionHandle: firstCol?.handle || "",
-            });
+          }
         }
+        `,
+            {
+                variables: {
+                    first,
+                    query: searchText,
+                },
+            }
+        );
+
+        const json = await parseGraphql(res);
+        const conn = json?.data?.products;
+        const normalizedSearch = cleanText(searchText).toLowerCase();
+
+        const shopifyItems = (conn?.edges || [])
+            .map((e) => e?.node)
+            .filter(Boolean)
+            .sort((a, b) => {
+                const aTitle = cleanText(a?.title).toLowerCase();
+                const bTitle = cleanText(b?.title).toLowerCase();
+
+                const aExact = aTitle === normalizedSearch ? 1 : 0;
+                const bExact = bTitle === normalizedSearch ? 1 : 0;
+
+                if (aExact !== bExact) return bExact - aExact;
+
+                const aContains = aTitle.includes(normalizedSearch) ? 1 : 0;
+                const bContains = bTitle.includes(normalizedSearch) ? 1 : 0;
+
+                if (aContains !== bContains) return bContains - aContains;
+
+                return aTitle.localeCompare(bTitle);
+            });
+
+        if (!shopifyItems.length) {
+            return {
+                items: [],
+                hasNextPage: false,
+                endCursor: null,
+            };
+        }
+
+        const allHandles = shopifyItems
+            .map((p) => cleanText(p.handle))
+            .filter(Boolean);
+
+        const ageSizeRangeMap = await fetchAgeSizeRangeMap(supabase, allHandles);
+
+        let savedQuery = supabase.from(EXTERNAL_TABLE).select("*").in("product_handle", allHandles);
+
+        if (collectionId) {
+            savedQuery = savedQuery.eq("collection_id", collectionId);
+        }
+
+        const { data: savedData, error: savedErr } = await savedQuery;
+        if (savedErr) throw new Error(savedErr.message);
+
+        const collectionsByProductId = {};
+        if (Array.isArray(savedData)) {
+            for (const record of savedData) {
+                const pId = record.shopify_product_id;
+                if (!pId) continue;
+
+                if (!collectionsByProductId[pId]) collectionsByProductId[pId] = [];
+
+                if (record.collection_id && record.collection_title) {
+                    collectionsByProductId[pId].push({
+                        id: record.collection_id,
+                        title: record.collection_title,
+                        handle: record.collection_handle || "",
+                        grade: record.grade || "",
+                    });
+                }
+            }
+        }
+
+        const products = shopifyItems
+            .map((p) => {
+                const variantEdges = p?.variants?.edges || [];
+
+                const collectArray = (optName) => {
+                    const vals = [];
+                    for (const ve of variantEdges) {
+                        const opts = ve?.node?.selectedOptions || [];
+                        for (const o of opts) {
+                            if (String(o.name || "").toLowerCase() === optName) vals.push(o.value);
+                        }
+                    }
+                    return Array.from(new Set(vals)).filter((v) => v != null && String(v).trim() !== "");
+                };
+
+                const firstValue = (optName) => {
+                    for (const ve of variantEdges) {
+                        const opts = ve?.node?.selectedOptions || [];
+                        for (const o of opts) {
+                            if (String(o.name || "").toLowerCase() === optName && o.value) return o.value;
+                        }
+                    }
+                    return null;
+                };
+
+                const firstCol = p?.collections?.edges?.[0]?.node || null;
+                const savedCollections = collectionsByProductId[p.id] || [];
+
+                return {
+                    id: p.id,
+                    title: p.title || "",
+                    handle: p.handle || "",
+                    grade: p?.metafield?.value || "",
+                    imageUrl: p?.featuredImage?.url || "",
+                    size: collectArray("size"),
+                    size_type: firstValue("size type"),
+                    size_range: firstValue("size range"),
+                    age_size_range: ageSizeRangeMap[cleanText(p.handle).toLowerCase()] || "",
+                    collectionId: savedCollections[0]?.id || firstCol?.id || "",
+                    collectionTitle: savedCollections[0]?.title || firstCol?.title || "",
+                    collectionHandle: savedCollections[0]?.handle || firstCol?.handle || "",
+                    savedCollections,
+                };
+            })
+            .filter((p) => {
+                if (!collectionId) return true;
+                return (p.savedCollections || []).some((c) => String(c.id) === String(collectionId));
+            });
 
         return {
             items: products,
@@ -951,6 +980,28 @@ export const action = async ({ request }) => {
         }
     }
 
+    if (intent === "deleteMapping") {
+
+        const productId = cleanText(form.get("productId"));
+        const collectionId = cleanText(form.get("collectionId"));
+
+        if (!productId || !collectionId) {
+            return { ok: false, error: "Missing productId or collectionId" };
+        }
+
+        const { error } = await supabase
+            .from(EXTERNAL_TABLE)
+            .delete()
+            .eq("shopify_product_id", productId)
+            .eq("collection_id", collectionId);
+
+        if (error) {
+            return { ok: false, error: error.message };
+        }
+
+        return { ok: true, intent, productId, collectionId };
+    }
+
     // delete only one collection row from external DB
     if (intent === "deleteCollection") {
         const productId = cleanText(form.get("productId"));
@@ -1107,6 +1158,7 @@ export default function GradeCollectionPage() {
     const [addingCollectionFor, setAddingCollectionFor] = useState(null);
     const [addDraftByProductId, setAddDraftByProductId] = useState({});
     const [searchQuery, setSearchQuery] = useState(initialSearchQuery || "");
+    const [editingUnsavedCollection, setEditingUnsavedCollection] = useState(null);
 
     // auto-sync controls
     const [syncOffset, setSyncOffset] = useState(0);
@@ -1440,22 +1492,12 @@ export default function GradeCollectionPage() {
     };
 
     const saveRow = (p) => {
-        const collectionsData = [...(collectionGradeByProductId[p.id] || [])];
-        const draft = addDraftByProductId[p.id];
-
-        if (draft && draft.collectionId) {
-            const alreadyExists = collectionsData.some((c) => c.id === draft.collectionId);
-            if (!alreadyExists) {
-                const titleFromList = gidToTitle.get(String(draft.collectionId)) || "";
-                const handleFromList = gidToHandle.get(String(draft.collectionId)) || "";
-                collectionsData.push({
-                    id: draft.collectionId,
-                    title: titleFromList || draft.collectionId,
-                    handle: handleFromList,
-                    grade: String(draft.grade ?? ""),
-                });
-            }
-        }
+        const collectionsData = [...(collectionGradeByProductId[p.id] || [])].map((item) => ({
+            id: item.id,
+            title: item.title,
+            handle: item.handle,
+            grade: item.grade,
+        }));
 
         setAddingCollectionFor(null);
         setAddDraftByProductId((prev) => {
@@ -1463,6 +1505,7 @@ export default function GradeCollectionPage() {
             delete next[p.id];
             return next;
         });
+        setEditingUnsavedCollection(null);
 
         fetcher.submit(
             {
@@ -1717,18 +1760,7 @@ export default function GradeCollectionPage() {
         color: #000;
       }
 
-      /* Fix IndexTable sticky headers and layout shift */
-      [role="table"] thead {
-        position: sticky;
-        top: 0;
-        background: #ffffff;
-        z-index: 10;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-      }
-
-      [role="table"] th {
-        background: #ffffff;
-      }
+      
 
       /* Prevent scrollbar width shift */
       html {
@@ -1803,135 +1835,174 @@ export default function GradeCollectionPage() {
                                     </div>
                                 </div>
 
-                                <div style={{ overflowX: "auto" }}>
-                                    <IndexTable
-                                        resourceName={{ singular: "product", plural: "products" }}
-                                        itemCount={filteredProducts.length}
-                                        selectable={false}
-                                        headings={headings}
-                                    >
-                                        {filteredProducts.map((p, idx) => {
-                                            const currentCollectionGrades = collectionGradeByProductId[p.id] || [];
-                                            const allowedCollections = currentCollectionGrades.filter((c) =>
-                                                ALLOWED_COLLECTION_IDS.has(String(c.id))
-                                            );
 
-                                            const originalCollectionGrades =
-                                                p.savedCollections && p.savedCollections.length > 0
-                                                    ? p.savedCollections
-                                                    : p.collectionId && p.collectionTitle
-                                                        ? [
-                                                            {
-                                                                id: p.collectionId,
-                                                                title: p.collectionTitle,
-                                                                handle: p.collectionHandle || "",
-                                                                grade: p.grade || "",
-                                                            },
-                                                        ]
-                                                        : [];
+                                <IndexTable
+                                    resourceName={{ singular: "product", plural: "products" }}
+                                    itemCount={filteredProducts.length}
+                                    selectable={false}
+                                    headings={headings}
+                                >
+                                    {filteredProducts.map((p, idx) => {
+                                        const currentCollectionGrades = collectionGradeByProductId[p.id] || [];
+                                        const allowedCollections = currentCollectionGrades.filter((c) =>
+                                            ALLOWED_COLLECTION_IDS.has(String(c.id))
+                                        );
 
-                                            const changed =
-                                                JSON.stringify(currentCollectionGrades) !==
-                                                JSON.stringify(originalCollectionGrades);
+                                        const originalCollectionGrades =
+                                            p.savedCollections && p.savedCollections.length > 0
+                                                ? p.savedCollections
+                                                : p.collectionId && p.collectionTitle
+                                                    ? [
+                                                        {
+                                                            id: p.collectionId,
+                                                            title: p.collectionTitle,
+                                                            handle: p.collectionHandle || "",
+                                                            grade: p.grade || "",
+                                                        },
+                                                    ]
+                                                    : [];
 
-                                            return (
-                                                <IndexTable.Row id={p.id} key={p.id} position={idx}>
-                                                    <IndexTable.Cell>
-                                                        <InlineStack align="trailing" gap="100">
-                                                            {p.imageUrl ? (
-                                                                <img
-                                                                    src={p.imageUrl}
-                                                                    alt={p.title || ""}
-                                                                    style={{
-                                                                        width: 48,
-                                                                        height: 48,
-                                                                        objectFit: "cover",
-                                                                        borderRadius: 6,
-                                                                    }}
-                                                                />
-                                                            ) : (
+                                        const changed =
+                                            JSON.stringify(currentCollectionGrades) !==
+                                            JSON.stringify(originalCollectionGrades);
+
+                                        return (
+                                            <IndexTable.Row id={p.id} key={p.id} position={idx}>
+                                                <IndexTable.Cell>
+                                                    <InlineStack align="trailing" gap="100">
+                                                        {p.imageUrl ? (
+                                                            <img
+                                                                src={p.imageUrl}
+                                                                alt={p.title || ""}
+                                                                style={{
+                                                                    width: 48,
+                                                                    height: 48,
+                                                                    objectFit: "cover",
+                                                                    borderRadius: 6,
+                                                                }}
+                                                            />
+                                                        ) : (
+                                                            <div
+                                                                style={{
+                                                                    width: 48,
+                                                                    height: 48,
+                                                                    background: "#f4f6f8",
+                                                                    borderRadius: 6,
+                                                                }}
+                                                            />
+                                                        )}
+                                                        <BlockStack gap="050">
+                                                            <Text as="span">{p.title}</Text>
+                                                        </BlockStack>
+                                                    </InlineStack>
+                                                </IndexTable.Cell>
+
+                                                <IndexTable.Cell>
+                                                    <Text as="span" tone={p.age_size_range ? "base" : "subdued"}>
+                                                        {p.age_size_range || ""}
+                                                    </Text>
+                                                </IndexTable.Cell>
+
+                                                <IndexTable.Cell>
+                                                    <BlockStack gap="150">
+                                                        {allowedCollections.length === 0 && addingCollectionFor !== p.id && (
+                                                            <Text tone="subdued">—</Text>
+                                                        )}
+
+                                                        {allowedCollections.map((collItem, colIdx) => {
+                                                            const isEditingThisUnsaved =
+                                                                editingUnsavedCollection?.productId === p.id &&
+                                                                editingUnsavedCollection?.collectionId === collItem.id &&
+                                                                collItem.__unsaved === true;
+
+                                                            return (
                                                                 <div
+                                                                    key={`${p.id}-collection-${colIdx}`}
                                                                     style={{
-                                                                        width: 48,
-                                                                        height: 48,
-                                                                        background: "#f4f6f8",
-                                                                        borderRadius: 6,
+                                                                        minHeight: 20,
+                                                                        display: "flex",
+                                                                        alignItems: "center",
+                                                                        marginBottom: 6,
                                                                     }}
-                                                                />
-                                                            )}
-                                                            <BlockStack gap="050">
-                                                                <Text as="span">{p.title}</Text>
-                                                            </BlockStack>
-                                                        </InlineStack>
-                                                    </IndexTable.Cell>
-
-                                                    <IndexTable.Cell>
-                                                        <Text as="span" tone={p.age_size_range ? "base" : "subdued"}>
-                                                            {p.age_size_range || ""}
-                                                        </Text>
-                                                    </IndexTable.Cell>
-
-                                                    <IndexTable.Cell>
-                                                        <BlockStack gap="150">
-                                                            {currentCollectionGrades.length === 0 && addingCollectionFor !== p.id && (
-                                                                <Text tone="subdued">—</Text>
-                                                            )}
-
-                                                            {currentCollectionGrades.map((collItem, colIdx) => {
-                                                                const isAllowed = ALLOWED_COLLECTION_IDS.has(String(collItem.id));
-                                                                return (
-                                                                    <InlineStack
-                                                                        key={`${p.id}-collection-${colIdx}`}
-                                                                        gap="200"
-                                                                        blockAlign="center"
-                                                                        wrap={false}
-                                                                    >
-                                                                        <div style={{ width: 180, whiteSpace: "normal" }}>
-                                                                            {isAllowed ? (
-                                                                                <Badge tone="info">{collItem.title}</Badge>
-                                                                            ) : (
-                                                                                <Text tone="subdued">—</Text>
-                                                                            )}
-                                                                        </div>
-                                                                    </InlineStack>
-                                                                );
-                                                            })}
-
-                                                            {addingCollectionFor === p.id ? (
-                                                                <BlockStack gap="100">
-                                                                    <InlineStack gap="200" blockAlign="end" wrap={false}>
-                                                                        <div style={{ minWidth: 200 }}>
+                                                                >
+                                                                    <div style={{ width: 230 }}>
+                                                                        {isEditingThisUnsaved ? (
                                                                             <Select
+                                                                                labelHidden
                                                                                 options={collectionOptions.filter(
                                                                                     (opt) =>
                                                                                         !opt.value ||
+                                                                                        opt.value === collItem.id ||
                                                                                         !(collectionGradeByProductId[p.id] || []).some(
                                                                                             (c) => c.id === opt.value
                                                                                         )
                                                                                 )}
-                                                                                value={addDraftByProductId[p.id]?.collectionId || ""}
-                                                                                onChange={(v) => {
-                                                                                    setAddDraftByProductId((prev) => ({
-                                                                                        ...prev,
-                                                                                        [p.id]: {
-                                                                                            collectionId: v,
-                                                                                            grade: prev[p.id]?.grade ?? "",
-                                                                                        },
-                                                                                    }));
+                                                                                value={String(collItem.id || "")}
+                                                                                onChange={(newCollectionId) => {
+                                                                                    if (!newCollectionId) return;
+
+                                                                                    const title = gidToTitle.get(newCollectionId) || "";
+                                                                                    const handle = gidToHandle.get(newCollectionId) || "";
+
+                                                                                    setCollectionGradeByProductId((prev) => {
+                                                                                        const existing = prev[p.id] || [];
+                                                                                        const updated = existing.map((item) => {
+                                                                                            if (String(item.id) !== String(collItem.id)) return item;
+
+                                                                                            return {
+                                                                                                ...item,
+                                                                                                id: newCollectionId,
+                                                                                                title,
+                                                                                                handle,
+                                                                                                __unsaved: true,
+                                                                                            };
+                                                                                        });
+
+                                                                                        return {
+                                                                                            ...prev,
+                                                                                            [p.id]: updated,
+                                                                                        };
+                                                                                    });
+
+                                                                                    setEditingUnsavedCollection(null);
                                                                                 }}
                                                                             />
-                                                                        </div>
+                                                                        ) : (
+                                                                            <div
+                                                                                onClick={() => {
+                                                                                    if (collItem.__unsaved === true) {
+                                                                                        setEditingUnsavedCollection({
+                                                                                            productId: p.id,
+                                                                                            collectionId: collItem.id,
+                                                                                        });
+                                                                                    }
+                                                                                }}
+                                                                                style={{
+                                                                                    cursor: collItem.__unsaved === true ? "pointer" : "default",
+                                                                                }}
+                                                                            >
+                                                                                <Badge tone="info">{collItem.title}</Badge>
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        })}
 
-                                                                        <Button
-                                                                            size="slim"
-                                                                            variant="primary"
-                                                                            onClick={() => {
-                                                                                const draft = addDraftByProductId[p.id];
-                                                                                const collectionId = String(
-                                                                                    draft?.collectionId || ""
-                                                                                ).trim();
-                                                                                const grade = String(draft?.grade || "").trim();
-
+                                                        {addingCollectionFor === p.id ? (
+                                                            <BlockStack gap="100">
+                                                                <InlineStack gap="200" blockAlign="end" wrap={false}>
+                                                                    <div style={{ minWidth: 200 }}>
+                                                                        <Select
+                                                                            options={collectionOptions.filter(
+                                                                                (opt) =>
+                                                                                    !opt.value ||
+                                                                                    !(collectionGradeByProductId[p.id] || []).some(
+                                                                                        (c) => c.id === opt.value
+                                                                                    )
+                                                                            )}
+                                                                            value={addDraftByProductId[p.id]?.collectionId || ""}
+                                                                            onChange={(collectionId) => {
                                                                                 if (!collectionId) return;
 
                                                                                 const title = gidToTitle.get(collectionId) || "";
@@ -1939,9 +2010,8 @@ export default function GradeCollectionPage() {
 
                                                                                 setCollectionGradeByProductId((prev) => {
                                                                                     const existing = prev[p.id] || [];
-                                                                                    if (
-                                                                                        existing.some((c) => c.id === collectionId)
-                                                                                    ) {
+
+                                                                                    if (existing.some((c) => c.id === collectionId)) {
                                                                                         return prev;
                                                                                     }
 
@@ -1951,111 +2021,143 @@ export default function GradeCollectionPage() {
                                                                                             ...existing,
                                                                                             {
                                                                                                 id: collectionId,
-                                                                                                title: title || collectionId,
+                                                                                                title,
                                                                                                 handle,
-                                                                                                grade,
+                                                                                                grade: "",
+                                                                                                __unsaved: true,
                                                                                             },
                                                                                         ],
                                                                                     };
                                                                                 });
 
                                                                                 setAddingCollectionFor(null);
-                                                                                setAddDraftByProductId((prev) => {
-                                                                                    const next = { ...prev };
-                                                                                    delete next[p.id];
-                                                                                    return next;
-                                                                                });
                                                                             }}
-                                                                        >
-                                                                            Add
-                                                                        </Button>
+                                                                        />
+                                                                    </div>
+
+
+                                                                </InlineStack>
+                                                            </BlockStack>
+                                                        ) : null}
+                                                    </BlockStack>
+                                                </IndexTable.Cell>
+
+                                                <IndexTable.Cell>
+                                                    <BlockStack gap="150">
+                                                        {allowedCollections.length === 0 && addingCollectionFor !== p.id && (
+                                                            <Text tone="subdued">—</Text>
+                                                        )}
+
+                                                        {allowedCollections.map((collItem, colIdx) => {
+                                                            const realIndex = currentCollectionGrades.findIndex(
+                                                                (item) => String(item.id) === String(collItem.id)
+                                                            );
+
+                                                            return (
+                                                                <div
+                                                                    key={`${p.id}-grade-${colIdx}`}
+                                                                    style={{
+                                                                        minHeight: 20,
+                                                                        display: "flex",
+                                                                        alignItems: "center",
+                                                                        marginBottom: 6,
+                                                                    }}
+                                                                >
+                                                                    <InlineStack gap="200" blockAlign="center" wrap={false}>
+                                                                        <div style={{ width: "100%", minWidth: 130 }}>
+                                                                            <TextField
+                                                                                label={`Grade for ${collItem.title}`}
+                                                                                labelHidden
+                                                                                placeholder="Enter grade"
+                                                                                value={String(collItem.grade ?? "")}
+                                                                                onChange={(v) => {
+                                                                                    setCollectionGradeByProductId((prev) => {
+                                                                                        const existing = prev[p.id] || [];
+                                                                                        const updated = existing.map((item, idx2) =>
+                                                                                            idx2 === realIndex ? { ...item, grade: v } : item
+                                                                                        );
+
+                                                                                        return {
+                                                                                            ...prev,
+                                                                                            [p.id]: updated,
+                                                                                        };
+                                                                                    });
+                                                                                }}
+                                                                                autoComplete="off"
+                                                                            />
+                                                                        </div>
 
                                                                         <Button
+                                                                            icon={DeleteIcon}
+                                                                            tone="critical"
+                                                                            variant="tertiary"
                                                                             size="slim"
-                                                                            onClick={() => {
-                                                                                setAddingCollectionFor(null);
-                                                                                setAddDraftByProductId((prev) => {
-                                                                                    const next = { ...prev };
-                                                                                    delete next[p.id];
-                                                                                    return next;
-                                                                                });
-                                                                            }}
-                                                                        >
-                                                                            Cancel
-                                                                        </Button>
-                                                                    </InlineStack>
-                                                                </BlockStack>
-                                                            ) : null}
-                                                        </BlockStack>
-                                                    </IndexTable.Cell>
-
-                                                    <IndexTable.Cell>
-                                                        <BlockStack gap="150">
-                                                            {currentCollectionGrades.length === 0 && addingCollectionFor !== p.id && (
-                                                                <Text tone="subdued">—</Text>
-                                                            )}
-
-                                                            {currentCollectionGrades.map((collItem, colIdx) => (
-                                                                <div key={`${p.id}-grade-${colIdx}`} style={{ width: "100%", minWidth: 130 }}>
-                                                                    <TextField
-                                                                        label={`Grade for ${collItem.title}`}
-                                                                        labelHidden
-                                                                        placeholder="Enter grade"
-                                                                        value={String(collItem.grade ?? "")}
-                                                                        onChange={(v) => {
-                                                                            setCollectionGradeByProductId((prev) => {
-                                                                                const existing = prev[p.id] || [];
-                                                                                const updated = existing.map((item, idx2) =>
-                                                                                    idx2 === colIdx
-                                                                                        ? { ...item, grade: v }
-                                                                                        : item
+                                                                            onClick={async () => {
+                                                                                const confirmDelete = window.confirm(
+                                                                                    "Delete this collection mapping?"
                                                                                 );
 
-                                                                                return {
-                                                                                    ...prev,
-                                                                                    [p.id]: updated,
-                                                                                };
-                                                                            });
-                                                                        }}
-                                                                        autoComplete="off"
-                                                                    />
-                                                                </div>
-                                                            ))}
+                                                                                if (!confirmDelete) return;
 
-                                                            {addingCollectionFor === p.id ? (
-                                                                <div style={{ width: "100%", minWidth: 130 }}>
-                                                                    <TextField
-                                                                        label="New collection grade"
-                                                                        labelHidden
-                                                                        placeholder="Enter grade for new collection"
-                                                                        value={String(addDraftByProductId[p.id]?.grade ?? "")}
-                                                                        onChange={(v) => {
-                                                                            setAddDraftByProductId((prev) => ({
-                                                                                ...prev,
-                                                                                [p.id]: {
-                                                                                    collectionId:
-                                                                                        prev[p.id]?.collectionId || "",
-                                                                                    grade: v,
-                                                                                },
-                                                                            }));
-                                                                        }}
-                                                                        autoComplete="off"
-                                                                    />
-                                                                </div>
-                                                            ) : null}
-                                                        </BlockStack>
-                                                    </IndexTable.Cell>
+                                                                                const isUnsaved = collItem.__unsaved === true;
 
-                                                    <IndexTable.Cell>
-                                                        <div
-                                                            style={{
-                                                                display: "flex",
-                                                                justifyContent: "space-between",
-                                                                alignItems: "center",
-                                                                width: "100%",
-                                                                gap: "12px",
-                                                            }}
-                                                        >
+                                                                                if (!isUnsaved) {
+                                                                                    await fetcher.submit(
+                                                                                        {
+                                                                                            intent: "deleteMapping",
+                                                                                            productId: p.id,
+                                                                                            collectionId: collItem.id,
+                                                                                        },
+                                                                                        { method: "post" }
+                                                                                    );
+                                                                                }
+
+                                                                                setCollectionGradeByProductId((prev) => {
+                                                                                    const existing = prev[p.id] || [];
+
+                                                                                    return {
+                                                                                        ...prev,
+                                                                                        [p.id]: existing.filter(
+                                                                                            (item) => String(item.id) !== String(collItem.id)
+                                                                                        ),
+                                                                                    };
+                                                                                });
+
+                                                                                setEditingUnsavedCollection((prev) => {
+                                                                                    if (
+                                                                                        prev?.productId === p.id &&
+                                                                                        prev?.collectionId === collItem.id
+                                                                                    ) {
+                                                                                        return null;
+                                                                                    }
+                                                                                    return prev;
+                                                                                });
+                                                                            }}
+                                                                        />
+                                                                    </InlineStack>
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </BlockStack>
+
+                                                </IndexTable.Cell>
+
+                                                <IndexTable.Cell>
+                                                    <div
+                                                        style={{
+                                                            display: "flex",
+                                                            alignItems: "center",
+                                                            justifyContent: "space-between",
+                                                            gap: "12px",
+                                                            width: "100%",
+                                                        }}
+                                                    >
+
+                                                        <InlineStack gap="200">
+
+
+
+                                                            {/* ADD COLLECTION BUTTON */}
                                                             {addingCollectionFor !== p.id ? (
                                                                 <Button
                                                                     variant="primary"
@@ -2069,21 +2171,25 @@ export default function GradeCollectionPage() {
                                                                 <div />
                                                             )}
 
-                                                            <Button
-                                                                variant="primary"
-                                                                loading={savingThisRow(p.id)}
-                                                                disabled={!changed}
-                                                                onClick={() => saveRow(p)}
-                                                            >
-                                                                Save
-                                                            </Button>
-                                                        </div>
-                                                    </IndexTable.Cell>
-                                                </IndexTable.Row>
-                                            );
-                                        })}
-                                    </IndexTable>
-                                </div>
+
+                                                        </InlineStack>
+
+                                                        {/* SAVE BUTTON */}
+                                                        <Button
+                                                            variant="primary"
+                                                            loading={savingThisRow(p.id)}
+                                                            disabled={!changed}
+                                                            onClick={() => saveRow(p)}
+                                                        >
+                                                            Save
+                                                        </Button>
+                                                    </div>
+                                                </IndexTable.Cell>
+                                            </IndexTable.Row>
+                                        );
+                                    })}
+                                </IndexTable>
+
 
                                 <InlineStack align="space-between">
                                     {shouldShowPagination ? (
