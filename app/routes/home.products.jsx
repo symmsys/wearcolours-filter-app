@@ -13,7 +13,7 @@ import {
     Page,
     Layout,
     Card,
-    Icon,
+    Link,
     IndexTable,
     Text,
     TextField,
@@ -68,6 +68,10 @@ const COLLECTION_REMOVE_PRODUCTS = `#graphql
     }
   }
 `;
+
+function getNumericIdFromGid(gid) {
+    return String(gid || "").split("/").pop() || "";
+}
 
 function cleanText(v) {
     return String(v ?? "").trim();
@@ -1582,6 +1586,12 @@ export default function GradeCollectionPage() {
         }
     }, [searchFetcher.state]);
 
+    const getAdminProductUrl = (productGid) => {
+        const numericId = getNumericIdFromGid(productGid);
+        if (!numericId || !shop) return "#";
+        return `https://${shop}/admin/products/${numericId}`;
+    };
+
     return (
         <Page fullWidth title="Grade and Collection">
             <Layout>
@@ -1892,7 +1902,9 @@ export default function GradeCollectionPage() {
                                                             />
                                                         )}
                                                         <BlockStack gap="050">
-                                                            <Text as="span">{p.title}</Text>
+                                                            <Link url={getAdminProductUrl(p.id)} target="_top" removeUnderline>
+                                                                {p.title}
+                                                            </Link>
                                                         </BlockStack>
                                                     </InlineStack>
                                                 </IndexTable.Cell>
