@@ -1,7 +1,7 @@
 // app/routes/home.products.jsx
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useFetcher, useLoaderData } from "react-router";
+import { useFetcher, useNavigate, useLoaderData } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
@@ -199,6 +199,109 @@ async function fetchAgeSizeRangeMap(supabase, handles = []) {
     }
 }
 
+async function fetchShopifySizeRangeFallbackMap(admin, handles = []) {
+    try {
+        const safeHandles = Array.from(
+            new Set((handles || []).map((h) => cleanText(h)).filter(Boolean))
+        );
+
+        if (!safeHandles.length) return {};
+
+        const out = {};
+        const chunkSize = 20;
+
+        const isSizeRangeField = (name) => {
+            const n = cleanText(name).toLowerCase();
+            return n === "size range";
+        };
+
+        for (let i = 0; i < safeHandles.length; i += chunkSize) {
+            const chunk = safeHandles.slice(i, i + chunkSize);
+            const query = chunk.map((h) => `handle:${h}`).join(" OR ");
+
+            const res = await admin.graphql(
+                `#graphql
+                query ProductsForSizeFallback($first: Int!, $query: String!) {
+                  products(first: $first, query: $query) {
+                    edges {
+                      node {
+                        handle
+                        options {
+                          name
+                          values
+                        }
+                        variants(first: 250) {
+                          edges {
+                            node {
+                              title
+                              selectedOptions {
+                                name
+                                value
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                `,
+                {
+                    variables: {
+                        first: 50,
+                        query,
+                    },
+                }
+            );
+
+            const json = await parseGraphql(res);
+            const edges = json?.data?.products?.edges || [];
+
+            for (const edge of edges) {
+                const product = edge?.node;
+                const handle = cleanText(product?.handle).toLowerCase();
+                if (!handle) continue;
+
+                let values = [];
+
+                // 1) First try product options
+                const matchedOption = (product?.options || []).find((opt) =>
+                    isSizeRangeField(opt?.name)
+                );
+
+                if (matchedOption?.values?.length) {
+                    values = matchedOption.values
+                        .map((v) => cleanText(v))
+                        .filter(Boolean);
+                }
+
+                // 2) Then try selectedOptions from variants
+                if (!values.length) {
+                    const variantEdges = product?.variants?.edges || [];
+
+                    for (const ve of variantEdges) {
+                        const opts = ve?.node?.selectedOptions || [];
+                        for (const o of opts) {
+                            if (isSizeRangeField(o?.name) && cleanText(o?.value)) {
+                                values.push(cleanText(o.value));
+                            }
+                        }
+                    }
+                }
+
+                // 3) Last fallback: variant title if not default
+
+                out[handle] = uniqStrings(values).join(", ");
+            }
+        }
+
+        return out;
+    } catch (err) {
+        console.error("fetchShopifySizeRangeFallbackMap error:", err);
+        return {};
+    }
+}
+
 async function fetchProductsWithGradeAndCollection(
     admin,
     supabase,
@@ -211,30 +314,31 @@ async function fetchProductsWithGradeAndCollection(
     if (searchText) {
         const res = await admin.graphql(
             `#graphql
-        query ProductsSearch($first: Int!, $query: String!) {
-          products(first: $first, query: $query, sortKey: TITLE) {
-            pageInfo { hasNextPage endCursor }
-            edges {
-              node {
-                id
-                title
-                handle
-                metafield(namespace: "${GRADE_NAMESPACE}", key: "${GRADE_KEY}") { value }
-                featuredImage { url altText }
-                variants(first: 250) {
-                  edges { node { selectedOptions { name value } } }
-                }
-                collections(first: 50) {
-                  edges { node { id title handle } }
-                }
-              }
+    query ProductsSearch($first: Int!, $after: String, $query: String!) {
+      products(first: $first, after: $after, query: $query, sortKey: TITLE) {
+        pageInfo { hasNextPage endCursor }
+        edges {
+          node {
+            id
+            title
+            handle
+            metafield(namespace: "${GRADE_NAMESPACE}", key: "${GRADE_KEY}") { value }
+            featuredImage { url altText }
+            variants(first: 250) {
+              edges { node { selectedOptions { name value } } }
+            }
+            collections(first: 50) {
+              edges { node { id title handle } }
             }
           }
         }
-        `,
+      }
+    }
+    `,
             {
                 variables: {
                     first,
+                    after,
                     query: searchText,
                 },
             }
@@ -247,28 +351,14 @@ async function fetchProductsWithGradeAndCollection(
         const shopifyItems = (conn?.edges || [])
             .map((e) => e?.node)
             .filter(Boolean)
-            .sort((a, b) => {
-                const aTitle = cleanText(a?.title).toLowerCase();
-                const bTitle = cleanText(b?.title).toLowerCase();
 
-                const aExact = aTitle === normalizedSearch ? 1 : 0;
-                const bExact = bTitle === normalizedSearch ? 1 : 0;
-
-                if (aExact !== bExact) return bExact - aExact;
-
-                const aContains = aTitle.includes(normalizedSearch) ? 1 : 0;
-                const bContains = bTitle.includes(normalizedSearch) ? 1 : 0;
-
-                if (aContains !== bContains) return bContains - aContains;
-
-                return aTitle.localeCompare(bTitle);
-            });
 
         if (!shopifyItems.length) {
             return {
                 items: [],
                 hasNextPage: false,
                 endCursor: null,
+                totalCount: 0,
             };
         }
 
@@ -277,6 +367,14 @@ async function fetchProductsWithGradeAndCollection(
             .filter(Boolean);
 
         const ageSizeRangeMap = await fetchAgeSizeRangeMap(supabase, allHandles);
+
+        const missingAgeSizeHandles = allHandles.filter(
+            (handle) => !cleanText(ageSizeRangeMap[cleanText(handle).toLowerCase()])
+        );
+
+        const shopifySizeFallbackMap = missingAgeSizeHandles.length
+            ? await fetchShopifySizeRangeFallbackMap(admin, missingAgeSizeHandles)
+            : {};
 
         let savedQuery = supabase.from(EXTERNAL_TABLE).select("*").in("product_handle", allHandles);
 
@@ -343,7 +441,10 @@ async function fetchProductsWithGradeAndCollection(
                     size: collectArray("size"),
                     size_type: firstValue("size type"),
                     size_range: firstValue("size range"),
-                    age_size_range: ageSizeRangeMap[cleanText(p.handle).toLowerCase()] || "",
+                    age_size_range:
+                        ageSizeRangeMap[cleanText(p.handle).toLowerCase()] ||
+                        shopifySizeFallbackMap[cleanText(p.handle).toLowerCase()] ||
+                        "",
                     collectionId: savedCollections[0]?.id || firstCol?.id || "",
                     collectionTitle: savedCollections[0]?.title || firstCol?.title || "",
                     collectionHandle: savedCollections[0]?.handle || firstCol?.handle || "",
@@ -355,10 +456,13 @@ async function fetchProductsWithGradeAndCollection(
                 return (p.savedCollections || []).some((c) => String(c.id) === String(collectionId));
             });
 
+        const totalCount = await fetchProductsCount(admin, searchText);
+
         return {
             items: products,
-            hasNextPage: false,
-            endCursor: null,
+            hasNextPage: !!conn?.pageInfo?.hasNextPage,
+            endCursor: conn?.pageInfo?.endCursor || null,
+            totalCount,
         };
     }
 
@@ -404,11 +508,16 @@ async function fetchProductsWithGradeAndCollection(
 
         const matchedProducts = Array.from(uniqueHandleMap.values());
 
+        const totalCount = matchedProducts.length;
+
         if (!matchedProducts.length) {
             return {
                 items: [],
                 hasNextPage: false,
                 endCursor: null,
+                totalCount: 0,
+                pageStart: 0,
+                pageEnd: 0,
             };
         }
 
@@ -421,6 +530,13 @@ async function fetchProductsWithGradeAndCollection(
             .filter(Boolean);
 
         const ageSizeRangeMap = await fetchAgeSizeRangeMap(supabase, handles);
+        const missingAgeSizeHandles = handles.filter(
+            (handle) => !cleanText(ageSizeRangeMap[cleanText(handle).toLowerCase()])
+        );
+
+        const shopifySizeFallbackMap = missingAgeSizeHandles.length
+            ? await fetchShopifySizeRangeFallbackMap(admin, missingAgeSizeHandles)
+            : {};
 
         const products = [];
 
@@ -480,7 +596,10 @@ async function fetchProductsWithGradeAndCollection(
                 size: collectArray("size"),
                 size_type: firstValue("size type"),
                 size_range: firstValue("size range"),
-                age_size_range: ageSizeRangeMap[cleanText(p.handle).toLowerCase()] || "",
+                age_size_range:
+                    ageSizeRangeMap[cleanText(p.handle).toLowerCase()] ||
+                    shopifySizeFallbackMap[cleanText(p.handle).toLowerCase()] ||
+                    "",
                 collectionId: entry.collection_id || "",
                 collectionTitle: entry.collection_title || "",
                 collectionHandle: entry.collection_handle || "",
@@ -499,6 +618,9 @@ async function fetchProductsWithGradeAndCollection(
             items: products,
             hasNextPage,
             endCursor: hasNextPage ? String(nextOffset) : null,
+            totalCount,
+            pageStart: totalCount ? numericOffset + 1 : 0,
+            pageEnd: Math.min(numericOffset + products.length, totalCount),
         };
     }
 
@@ -581,6 +703,14 @@ async function fetchProductsWithGradeAndCollection(
 
     const ageSizeRangeMap = await fetchAgeSizeRangeMap(supabase, allProductHandles);
 
+    const missingAgeSizeHandles = allProductHandles.filter(
+        (handle) => !cleanText(ageSizeRangeMap[cleanText(handle).toLowerCase()])
+    );
+
+    const shopifySizeFallbackMap = missingAgeSizeHandles.length
+        ? await fetchShopifySizeRangeFallbackMap(admin, missingAgeSizeHandles)
+        : {};
+
     const collectionsByProductId = {};
     if (savedData && Array.isArray(savedData)) {
         for (const record of savedData) {
@@ -599,7 +729,10 @@ async function fetchProductsWithGradeAndCollection(
 
     const mergedItems = items.map((item) => {
         const savedCollections = collectionsByProductId[item.id] || [];
-        const ageSizeRange = ageSizeRangeMap[cleanText(item.handle).toLowerCase()] || "";
+        const ageSizeRange =
+            ageSizeRangeMap[cleanText(item.handle).toLowerCase()] ||
+            shopifySizeFallbackMap[cleanText(item.handle).toLowerCase()] ||
+            "";
 
         if (savedCollections.length > 0) {
             return {
@@ -621,10 +754,13 @@ async function fetchProductsWithGradeAndCollection(
 
 
 
+    const totalCount = await fetchProductsCount(admin, "");
+
     return {
         items: mergedItems,
         hasNextPage: !!conn?.pageInfo?.hasNextPage,
         endCursor: conn?.pageInfo?.endCursor || null,
+        totalCount,
     };
 }
 
@@ -660,7 +796,10 @@ async function fetchProductByHandleWithCollectionsAndSizes(admin, handle) {
     for (const ve of variantEdges) {
         const opts = ve?.node?.selectedOptions || [];
         for (const o of opts) {
-            if (String(o?.name || "").toLowerCase() === "size" && o?.value) sizes.push(o.value);
+
+            if (String(o?.name || "").toLowerCase() === "size range" && o?.value) {
+                sizes.push(o.value);
+            }
         }
     }
 
@@ -728,6 +867,31 @@ function safeErrToString(e) {
     }
 }
 
+async function fetchProductsCount(admin, search = "") {
+    try {
+        const res = await admin.graphql(
+            `#graphql
+            query ProductsCount($query: String) {
+              productsCount(query: $query) {
+                count
+              }
+            }
+            `,
+            {
+                variables: {
+                    query: search ? String(search) : null,
+                },
+            }
+        );
+
+        const json = await parseGraphql(res);
+        return Number(json?.data?.productsCount?.count || 0);
+    } catch (err) {
+        console.error("fetchProductsCount error:", err);
+        return null;
+    }
+}
+
 /* ---------------- LOADER ---------------- */
 
 export const loader = async ({ request }) => {
@@ -739,8 +903,16 @@ export const loader = async ({ request }) => {
     const after = url.searchParams.get("after");
     const q = (url.searchParams.get("q") || "").trim();
     const collectionId = (url.searchParams.get("collectionId") || "").trim();
+    const page = Math.max(1, Number.parseInt(url.searchParams.get("page") || "1", 10) || 1);
 
-    const { items, hasNextPage, endCursor } = await fetchProductsWithGradeAndCollection(admin, supabase, {
+    const {
+        items,
+        hasNextPage,
+        endCursor,
+        totalCount = null,
+        pageStart = null,
+        pageEnd = null,
+    } = await fetchProductsWithGradeAndCollection(admin, supabase, {
         first: 50,
         after: after || null,
         search: q,
@@ -766,7 +938,11 @@ export const loader = async ({ request }) => {
         hasNextPage,
         endCursor,
         after: after || null,
+        page,
         masterTotal,
+        totalCount,
+        pageStart,
+        pageEnd,
     };
 };
 
@@ -1133,6 +1309,8 @@ export const action = async ({ request }) => {
 export default function GradeCollectionPage() {
     const loaderData = useLoaderData();
 
+    const navigate = useNavigate();
+    const [cursorStack, setCursorStack] = useState([]);
     useAppBridge(); // keep bridge ready
 
     const fetcher = useFetcher(); // saveRow
@@ -1148,9 +1326,13 @@ export default function GradeCollectionPage() {
         hasNextPage,
         endCursor,
         after,
+        page,
         masterTotal,
         searchQuery: initialSearchQuery,
         selectedCollectionId: initialSelectedCollectionId,
+        totalCount,
+        pageStart,
+        pageEnd,
     } = data;
 
     const [collectionGradeByProductId, setCollectionGradeByProductId] = useState({});
@@ -1163,6 +1345,14 @@ export default function GradeCollectionPage() {
     const [addDraftByProductId, setAddDraftByProductId] = useState({});
     const [searchQuery, setSearchQuery] = useState(initialSearchQuery || "");
     const [editingUnsavedCollection, setEditingUnsavedCollection] = useState(null);
+
+    const PAGE_SIZE = 50;
+
+    const isCollectionMode = !!initialSelectedCollectionId && !initialSearchQuery;
+
+
+
+
 
     // auto-sync controls
     const [syncOffset, setSyncOffset] = useState(0);
@@ -1235,6 +1425,11 @@ export default function GradeCollectionPage() {
 
     const syncDone =
         syncFetcher.data?.intent === "syncGradesBatch" && syncFetcher.data?.ok === true ? !!syncFetcher.data.done : false;
+
+
+    useEffect(() => {
+        setCursorStack([]);
+    }, [initialSearchQuery, initialSelectedCollectionId]);
 
     // Keep totals updated from server response (no per-batch UI rendering)
     useEffect(() => {
@@ -1567,6 +1762,9 @@ export default function GradeCollectionPage() {
             if (selectedTrimmed) {
                 params.set("collectionId", selectedTrimmed);
             }
+
+            params.set("page", "1");
+            params.delete("after");
 
             const qs = params.toString();
 
@@ -1902,7 +2100,7 @@ export default function GradeCollectionPage() {
                                                             />
                                                         )}
                                                         <BlockStack gap="050">
-                                                            <Link url={getAdminProductUrl(p.id)} target="_top" removeUnderline>
+                                                            <Link url={getAdminProductUrl(p.id)} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none", color: "inherit", fontWeight: 500 }} removeUnderline>
                                                                 {p.title}
                                                             </Link>
                                                         </BlockStack>
@@ -2206,26 +2404,70 @@ export default function GradeCollectionPage() {
                                 <InlineStack align="space-between">
                                     {shouldShowPagination ? (
                                         <Pagination
-                                            hasPrevious={!!after}
+                                            hasPrevious={
+                                                isCollectionMode
+                                                    ? Number(after || 0) > 0
+                                                    : cursorStack.length > 0
+                                            }
+                                            hasNext={hasNextPage}
                                             onPrevious={() => {
                                                 const u = new URL(window.location.href);
-                                                u.searchParams.delete("after");
-                                                window.location.href = u.toString();
+
+                                                if (isCollectionMode) {
+                                                    const currentOffset = Number(after || 0);
+                                                    const prevOffset = Math.max(0, currentOffset - PAGE_SIZE);
+
+                                                    if (prevOffset === 0) {
+                                                        u.searchParams.delete("after");
+                                                    } else {
+                                                        u.searchParams.set("after", String(prevOffset));
+                                                    }
+
+                                                    navigate(`${u.pathname}${u.search}`);
+                                                    return;
+                                                }
+
+                                                setCursorStack((prev) => {
+                                                    const nextStack = [...prev];
+                                                    const previousCursor = nextStack.pop();
+
+                                                    if (previousCursor) {
+                                                        u.searchParams.set("after", previousCursor);
+                                                    } else {
+                                                        u.searchParams.delete("after");
+                                                    }
+
+                                                    navigate(`${u.pathname}${u.search}`);
+                                                    return nextStack;
+                                                });
                                             }}
-                                            hasNext={hasNextPage}
                                             onNext={() => {
+                                                if (!endCursor) return;
+
                                                 const u = new URL(window.location.href);
+
+                                                if (isCollectionMode) {
+                                                    const currentOffset = Number(after || 0);
+                                                    const nextOffset = currentOffset + PAGE_SIZE;
+                                                    u.searchParams.set("after", String(nextOffset));
+                                                    navigate(`${u.pathname}${u.search}`);
+                                                    return;
+                                                }
+
+                                                setCursorStack((prev) => {
+                                                    const currentCursor = after || "";
+                                                    return [...prev, currentCursor];
+                                                });
+
                                                 u.searchParams.set("after", endCursor);
-                                                window.location.href = u.toString();
+                                                navigate(`${u.pathname}${u.search}`);
                                             }}
                                         />
                                     ) : (
                                         <div />
                                     )}
 
-                                    <Text as="span" tone="subdued">
-                                        Showing {filteredProducts.length} of {products.length} products
-                                    </Text>
+                                    <div />
                                 </InlineStack>
                             </BlockStack>
                         </div>
