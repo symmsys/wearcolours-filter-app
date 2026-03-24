@@ -39,6 +39,15 @@ const ALLOWED_COLLECTION_IDS = new Set([
     "gid://shopify/Collection/282935689287",
 ]);
 
+const COLLECTION_GID_TO_SCHOOL = {
+    "gid://shopify/Collection/276875411527": "Regina Dominican",
+    "gid://shopify/Collection/282935689287": "FSHA",
+    "gid://shopify/Collection/276875509831": "AOLP",
+    "gid://shopify/Collection/276875280455": "Castilleja",
+    "gid://shopify/Collection/276875444295": "NDB",
+    "gid://shopify/Collection/276875247687": "Marlborough",
+};
+
 // Shopify metafield: custom.grade
 const GRADE_NAMESPACE = "custom";
 const GRADE_KEY = "grade";
@@ -946,6 +955,34 @@ export const loader = async ({ request }) => {
     };
 };
 
+async function updateMasterDatabaseGrades(supabase, { productHandle, collectionGradesList = [] }) {
+    const cleanHandle = cleanText(productHandle);
+    if (!cleanHandle) return;
+
+    for (const item of collectionGradesList) {
+        const collectionId = cleanText(item?.id);
+        const grade = cleanText(item?.grade);
+        const schoolName = COLLECTION_GID_TO_SCHOOL[collectionId];
+
+        // If collection is not in hardcoded map, skip it
+        if (!schoolName) continue;
+
+        const { error } = await supabase
+            .from(MASTER_TABLE)
+            .update({
+                Grade: grade || null,
+            })
+            .eq("Handle", cleanHandle)
+            .eq("School", schoolName);
+
+        if (error) {
+            throw new Error(
+                `Failed to update master database colours for handle "${cleanHandle}" and school "${schoolName}": ${error.message}`
+            );
+        }
+    }
+}
+
 /* ---------------- ACTION ---------------- */
 
 export const action = async ({ request }) => {
@@ -1292,9 +1329,20 @@ export const action = async ({ request }) => {
             const { error: upErr } = await supabase
                 .from(EXTERNAL_TABLE)
                 .upsert(upsertRecords, { onConflict: "shopify_product_id,collection_id" });
+
             if (upErr) throw new Error(upErr.message);
+
+            // NEW: update Grade in "master database colours"
+            await updateMasterDatabaseGrades(supabase, {
+                productHandle,
+                collectionGradesList,
+            });
         } else {
-            const { error: delErr } = await supabase.from(EXTERNAL_TABLE).delete().eq("shopify_product_id", productId);
+            const { error: delErr } = await supabase
+                .from(EXTERNAL_TABLE)
+                .delete()
+                .eq("shopify_product_id", productId);
+
             if (delErr) throw new Error(delErr.message);
         }
 
