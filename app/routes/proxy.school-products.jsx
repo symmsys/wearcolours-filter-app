@@ -1,4 +1,4 @@
-// app/routes/apps.school-products.jsx
+// app/routes/proxy.school-products.jsx
 // App Proxy endpoint: /apps/school-products
 
 import { authenticate } from "../shopify.server";
