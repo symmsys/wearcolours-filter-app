@@ -1168,7 +1168,7 @@ export const action = async ({ request }) => {
                         job_type: "grade_sync",
                         status: "paused",
                         batch_offset: 0,
-                        batch_limit: 100,
+                        batch_limit: 200,
                         total_master: null,
                         batches: 0,
                         unique_handles: 0,
@@ -1789,7 +1789,7 @@ export default function GradeCollectionPage() {
                                             disabled={isSaving || isRunning || alreadyComplete}
                                             onClick={startAutoSync}
                                         >
-                                            Sync all
+                                            Resume Sync
                                         </Button>
 
                                         {isRunning ? (
