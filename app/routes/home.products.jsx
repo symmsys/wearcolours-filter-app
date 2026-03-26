@@ -1015,7 +1015,7 @@ export const action = async ({ request }) => {
         if (!shop) return { ok: false, error: "Missing shop" };
 
         try {
-            const batchLimit = Math.max(1, Math.min(200, toInt(form.get("batchLimit"), 100)));
+            const batchLimit = Math.max(1, Math.max(200, toInt(form.get("batchLimit"), 100)));
 
             const { data: existingJob, error: existingErr } = await supabase
                 .from("sync_jobs")
@@ -1101,34 +1101,6 @@ export const action = async ({ request }) => {
                 .eq("shop", shop)
                 .eq("job_type", "grade_sync")
                 .in("status", ["queued", "running"])
-                .select("*")
-                .limit(1)
-                .maybeSingle();
-
-            if (error) throw new Error(error.message);
-
-            return { ok: true, intent, job: data || null };
-        } catch (e) {
-            return { ok: false, intent, error: safeErrToString(e) };
-        }
-    }
-
-    if (intent === "resumeSyncJob") {
-        const { session } = await authenticate.admin(request);
-        const shop = session?.shop || "";
-
-        try {
-            const { data, error } = await supabase
-                .from("sync_jobs")
-                .update({
-                    status: "queued",
-                    cancel_requested: false,
-                    error_message: null,
-                    updated_at: new Date().toISOString(),
-                })
-                .eq("shop", shop)
-                .eq("job_type", "grade_sync")
-                .eq("status", "paused")
                 .select("*")
                 .limit(1)
                 .maybeSingle();
@@ -1449,13 +1421,23 @@ export default function GradeCollectionPage() {
 
     const currentJob =
         syncFetcher.state !== "idle"
-            ? (syncFetcher.data?.job || syncJob || null)
-            : (searchFetcher.data?.syncJob || syncJob || null);
+            ? (syncFetcher.data?.job ?? searchFetcher.data?.syncJob ?? syncJob ?? null)
+            : (searchFetcher.data?.syncJob ?? syncFetcher.data?.job ?? syncJob ?? null);
+
     const currentStatus = currentJob?.status || "idle";
 
     const isRunning = currentStatus === "queued" || currentStatus === "running";
     const isPaused = currentStatus === "paused";
     const alreadyComplete = currentStatus === "completed";
+
+    const isResetState =
+        currentStatus === "paused" &&
+        !currentJob?.started_at &&
+        Number(currentJob?.batch_offset || 0) === 0;
+
+    const showPausedLabel = isPaused && !isResetState;
+
+    const showResumeButton = !isRunning && !alreadyComplete && isPaused && !isResetState;
 
     const currentOffset = Number(currentJob?.batch_offset || 0);
     const totalForUI = Number(currentJob?.total_master || masterTotal || 0);
@@ -1628,14 +1610,7 @@ export default function GradeCollectionPage() {
         );
     };
 
-    const resumeSync = () => {
-        syncFetcher.submit(
-            {
-                intent: "resumeSyncJob",
-            },
-            { method: "POST" }
-        );
-    };
+
 
     const resetSync = () => {
         syncFetcher.submit(
@@ -1783,22 +1758,26 @@ export default function GradeCollectionPage() {
                                     </Text>
 
                                     <InlineStack gap="200" blockAlign="center">
-                                        <Button
-                                            variant="primary"
-                                            loading={syncFetcher.state !== "idle"}
-                                            disabled={isSaving || isRunning || alreadyComplete}
-                                            onClick={startAutoSync}
-                                        >
-                                            Resume Sync
-                                        </Button>
-
-                                        {isRunning ? (
-                                            <Button tone="critical" disabled={isSaving || syncFetcher.state !== "idle"} onClick={stopAutoSync}>
-                                                Pause
+                                        {!alreadyComplete && !isRunning ? (
+                                            <Button
+                                                variant="primary"
+                                                loading={syncFetcher.state !== "idle"}
+                                                disabled={isSaving || syncFetcher.state !== "idle"}
+                                                onClick={startAutoSync}
+                                            >
+                                                {showResumeButton ? "Resume Sync" : "Sync all"}
                                             </Button>
                                         ) : null}
 
-
+                                        {isRunning ? (
+                                            <Button
+                                                tone="critical"
+                                                disabled={isSaving || syncFetcher.state !== "idle"}
+                                                onClick={stopAutoSync}
+                                            >
+                                                Pause
+                                            </Button>
+                                        ) : null}
                                     </InlineStack>
                                 </InlineStack>
 
@@ -1808,13 +1787,15 @@ export default function GradeCollectionPage() {
                                             <Text as="span" tone="subdued">
                                                 {alreadyComplete
                                                     ? "Sync complete"
-                                                    : typeof totalForUI === "number"
-                                                        ? `${syncedSoFar} / ${totalForUI}`
-                                                        : `${syncedSoFar} / ?`}
+                                                    : isResetState
+                                                        ? "Ready to sync"
+                                                        : typeof totalForUI === "number"
+                                                            ? `${syncedSoFar} / ${totalForUI}`
+                                                            : `${syncedSoFar} / ?`}
                                             </Text>
 
                                             <Text as="span" tone="subdued">
-                                                {currentStatus === "paused"
+                                                {showPausedLabel
                                                     ? "Paused"
                                                     : alreadyComplete
                                                         ? "Sync complete"
