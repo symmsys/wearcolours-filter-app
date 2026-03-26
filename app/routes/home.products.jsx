@@ -938,6 +938,22 @@ export const loader = async ({ request }) => {
         // ignore
     }
 
+    let syncJob = null;
+    try {
+        const { data, error } = await supabase
+            .from("sync_jobs")
+            .select("*")
+            .eq("shop", shop)
+            .eq("job_type", "grade_sync")
+            .order("id", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+        if (!error) syncJob = data || null;
+    } catch {
+        // ignore
+    }
+
     return {
         shop,
         products: items,
@@ -952,6 +968,7 @@ export const loader = async ({ request }) => {
         totalCount,
         pageStart,
         pageEnd,
+        syncJob,
     };
 };
 
@@ -991,211 +1008,221 @@ export const action = async ({ request }) => {
     const form = await request.formData();
     const intent = cleanText(form.get("intent"));
 
-    // Sync ONLY: process N master rows at a time. UI can auto-chain.
-    if (intent === "syncGradesBatch") {
-        const offset = Math.max(0, toInt(form.get("offset"), 0));
-        const limit = Math.max(1, Math.min(200, toInt(form.get("limit"), 50)));
+    if (intent === "startSyncJob") {
+        const { session } = await authenticate.admin(request);
+        const shop = session?.shop || "";
 
-        // Run totals come from the client, but are UPDATED on the server each batch.
-        let runTotals = {
-            batches: 0,
-            uniqueHandles: 0,
-            updatedHandles: 0,
-            updatedRows: 0,
-            insertedProducts: 0,
-            insertedRows: 0,
-            missingInShopify: 0,
-        };
-        const runTotalsRaw = form.get("runTotals");
-        if (runTotalsRaw) {
-            try {
-                const parsed = JSON.parse(String(runTotalsRaw));
-                if (parsed && typeof parsed === "object") runTotals = { ...runTotals, ...parsed };
-            } catch {
-                // ignore
-            }
-        }
+        if (!shop) return { ok: false, error: "Missing shop" };
 
         try {
-            const { data: masterRows, error: masterErr, count: masterTotal } = await supabase
-                .from(MASTER_TABLE)
-                .select('"Handle","Grade"', { count: "exact" })
-                .range(offset, offset + limit - 1);
+            const batchLimit = Math.max(1, Math.min(200, toInt(form.get("batchLimit"), 100)));
 
-            if (masterErr) throw new Error(masterErr.message);
+            const { data: existingJob, error: existingErr } = await supabase
+                .from("sync_jobs")
+                .select("*")
+                .eq("shop", shop)
+                .eq("job_type", "grade_sync")
+                .order("id", { ascending: false })
+                .limit(1)
+                .maybeSingle();
 
-            const rows = masterRows || [];
-            const batchFetched = rows.length;
+            if (existingErr) throw new Error(existingErr.message);
 
-            // Nothing left => done. (Important: avoid throwing errors here.)
-            if (batchFetched === 0) {
-                return {
-                    ok: true,
-                    intent,
-                    done: true,
-                    summary: {
-                        offset,
-                        limit,
-                        batchFetched: 0,
-                        uniqueHandles: 0,
-                        updatedHandles: 0,
-                        updatedRows: 0,
-                        insertedProducts: 0,
-                        insertedRows: 0,
-                        missingInShopify: 0,
-                        masterTotal: typeof masterTotal === "number" ? masterTotal : null,
-                        nextOffset: offset,
-                        hasMore: false,
-                    },
-                    runTotals: { ...runTotals },
-                };
+            // If there is already a running or queued job, just return it
+            if (existingJob && ["queued", "running"].includes(existingJob.status)) {
+                return { ok: true, intent, job: existingJob };
             }
 
-            // unique handle => grade (prefer non-empty grade)
-            const handleToGrade = new Map();
-            for (const r of rows) {
-                const handleRaw = cleanText(r?.Handle);
-                if (!handleRaw) continue;
-                const key = handleRaw.toLowerCase();
-                const grade = cleanText(r?.Grade);
-                if (!handleToGrade.has(key)) {
-                    handleToGrade.set(key, { handleRaw, grade });
-                } else {
-                    const prev = handleToGrade.get(key);
-                    if ((!prev?.grade || prev.grade === "") && grade) {
-                        handleToGrade.set(key, { handleRaw: prev?.handleRaw || handleRaw, grade });
-                    }
-                }
+            // If there is a paused/completed/failed/cancelled job, reuse it and start from its current state
+            if (existingJob) {
+                const { data: resumedJob, error: resumeErr } = await supabase
+                    .from("sync_jobs")
+                    .update({
+                        status: "queued",
+                        batch_limit: batchLimit,
+                        cancel_requested: false,
+                        error_message: null,
+                        updated_at: new Date().toISOString(),
+                    })
+                    .eq("id", existingJob.id)
+                    .select("*")
+                    .single();
+
+                if (resumeErr) throw new Error(resumeErr.message);
+
+                return { ok: true, intent, job: resumedJob };
             }
 
-            const keys = Array.from(handleToGrade.keys());
-            const uniqueHandles = keys.length;
-
-            let updatedHandles = 0;
-            let updatedRows = 0;
-            let insertedProducts = 0;
-            let insertedRows = 0;
-            let missingInShopify = 0;
-
-            for (const hKey of keys) {
-                const entry = handleToGrade.get(hKey);
-                const handleRaw = entry?.handleRaw || hKey;
-                const grade = cleanText(entry?.grade);
-
-                // Does handle already exist in EXTERNAL_TABLE? (case-insensitive)
-                const { data: existing, error: existErr } = await supabase
-                    .from(EXTERNAL_TABLE)
-                    .select("id,size")
-                    .ilike("product_handle", handleRaw);
-
-                if (existErr) throw new Error(existErr.message);
-
-                const exists = Array.isArray(existing) && existing.length > 0;
-
-                if (exists) {
-                    // Merge ALL existing size arrays for this handle into a single array and write it back.
-                    const mergedSizes = [];
-                    for (const row of existing) {
-                        const s = row?.size;
-                        if (Array.isArray(s)) mergedSizes.push(...s);
-                        else if (typeof s === "string" && s.trim()) mergedSizes.push(s.trim());
-                    }
-                    const mergedSizeArray = uniqStrings(mergedSizes);
-
-                    const { data: updData, error: updErr, count } = await supabase
-                        .from(EXTERNAL_TABLE)
-                        .update({
-                            grade: grade || null,
-                            size: mergedSizeArray.length ? mergedSizeArray : null,
-                            updated_at: new Date().toISOString(),
-                        })
-                        .ilike("product_handle", handleRaw)
-                        .select("id", { count: "exact" });
-
-                    if (updErr) throw new Error(updErr.message);
-
-                    updatedHandles += 1;
-                    if (typeof count === "number") updatedRows += count;
-                    else if (Array.isArray(updData)) updatedRows += updData.length;
-                    continue;
-                }
-
-                // Not in external table: fetch from Shopify; if not in Shopify, do not add.
-                const prod = await fetchProductByHandleWithCollectionsAndSizes(admin, handleRaw);
-                if (!prod?.id) {
-                    missingInShopify += 1;
-                    continue;
-                }
-
-                const cols = prod.collections || [];
-                if (cols.length === 0) {
-                    // Nothing to insert if no collections
-                    continue;
-                }
-
-                const upsertRecords = cols.map((c) => ({
-                    shopify_product_id: prod.id,
-                    product_title: prod.title || null,
-                    product_handle: prod.handle || handleRaw || null,
-                    collection_id: c.id || null,
-                    collection_title: c.title || null,
-                    collection_handle: c.handle || null,
-                    grade: grade || null,
-                    size: prod.sizes && prod.sizes.length ? prod.sizes : null,
+            // No job exists yet, create a new queued one
+            const { data: newJob, error: newErr } = await supabase
+                .from("sync_jobs")
+                .insert({
+                    shop,
+                    job_type: "grade_sync",
+                    status: "queued",
+                    batch_offset: 0,
+                    batch_limit: batchLimit,
+                    total_master: null,
+                    batches: 0,
+                    unique_handles: 0,
+                    updated_handles: 0,
+                    updated_rows: 0,
+                    inserted_products: 0,
+                    inserted_rows: 0,
+                    missing_in_shopify: 0,
+                    cancel_requested: false,
+                    error_message: null,
+                    started_at: null,
+                    completed_at: null,
                     updated_at: new Date().toISOString(),
-                }));
+                })
+                .select("*")
+                .single();
 
-                const { data: insData, error: insErr } = await supabase
-                    .from(EXTERNAL_TABLE)
-                    .upsert(upsertRecords, { onConflict: "shopify_product_id,collection_id" })
-                    .select("id");
+            if (newErr) throw new Error(newErr.message);
 
-                if (insErr) throw new Error(insErr.message);
-
-                insertedProducts += 1;
-                if (Array.isArray(insData)) insertedRows += insData.length;
-                else insertedRows += upsertRecords.length;
-            }
-
-            const nextOffset = offset + limit;
-            const total = typeof masterTotal === "number" ? masterTotal : null;
-            const hasMore = total == null ? true : nextOffset < total;
-
-            // Update totals on the server (so UI can show ONLY final totals)
-            const newTotals = {
-                batches: (runTotals.batches || 0) + 1,
-                uniqueHandles: (runTotals.uniqueHandles || 0) + (uniqueHandles || 0),
-                updatedHandles: (runTotals.updatedHandles || 0) + (updatedHandles || 0),
-                updatedRows: (runTotals.updatedRows || 0) + (updatedRows || 0),
-                insertedProducts: (runTotals.insertedProducts || 0) + (insertedProducts || 0),
-                insertedRows: (runTotals.insertedRows || 0) + (insertedRows || 0),
-                missingInShopify: (runTotals.missingInShopify || 0) + (missingInShopify || 0),
-            };
-
-            return {
-                ok: true,
-                intent,
-                done: !hasMore,
-                summary: {
-                    offset,
-                    limit,
-                    batchFetched,
-                    uniqueHandles,
-                    updatedHandles,
-                    updatedRows,
-                    insertedProducts,
-                    insertedRows,
-                    missingInShopify,
-                    masterTotal: total,
-                    nextOffset,
-                    hasMore,
-                },
-                runTotals: newTotals,
-            };
+            return { ok: true, intent, job: newJob };
         } catch (e) {
             return { ok: false, intent, error: safeErrToString(e) };
         }
     }
+
+    if (intent === "pauseSyncJob") {
+        const { session } = await authenticate.admin(request);
+        const shop = session?.shop || "";
+
+        try {
+            const { data, error } = await supabase
+                .from("sync_jobs")
+                .update({
+                    status: "paused",
+                    updated_at: new Date().toISOString(),
+                })
+                .eq("shop", shop)
+                .eq("job_type", "grade_sync")
+                .in("status", ["queued", "running"])
+                .select("*")
+                .limit(1)
+                .maybeSingle();
+
+            if (error) throw new Error(error.message);
+
+            return { ok: true, intent, job: data || null };
+        } catch (e) {
+            return { ok: false, intent, error: safeErrToString(e) };
+        }
+    }
+
+    if (intent === "resumeSyncJob") {
+        const { session } = await authenticate.admin(request);
+        const shop = session?.shop || "";
+
+        try {
+            const { data, error } = await supabase
+                .from("sync_jobs")
+                .update({
+                    status: "queued",
+                    cancel_requested: false,
+                    error_message: null,
+                    updated_at: new Date().toISOString(),
+                })
+                .eq("shop", shop)
+                .eq("job_type", "grade_sync")
+                .eq("status", "paused")
+                .select("*")
+                .limit(1)
+                .maybeSingle();
+
+            if (error) throw new Error(error.message);
+
+            return { ok: true, intent, job: data || null };
+        } catch (e) {
+            return { ok: false, intent, error: safeErrToString(e) };
+        }
+    }
+
+    if (intent === "resetSyncJob") {
+        const { session } = await authenticate.admin(request);
+        const shop = session?.shop || "";
+
+        if (!shop) return { ok: false, error: "Missing shop" };
+
+        try {
+            const { data: existingJob, error: existingErr } = await supabase
+                .from("sync_jobs")
+                .select("*")
+                .eq("shop", shop)
+                .eq("job_type", "grade_sync")
+                .order("id", { ascending: false })
+                .limit(1)
+                .maybeSingle();
+
+            if (existingErr) throw new Error(existingErr.message);
+
+            // If no job exists yet, create a fresh paused job
+            if (!existingJob) {
+                const { data: newJob, error: newErr } = await supabase
+                    .from("sync_jobs")
+                    .insert({
+                        shop,
+                        job_type: "grade_sync",
+                        status: "paused",
+                        batch_offset: 0,
+                        batch_limit: 100,
+                        total_master: null,
+                        batches: 0,
+                        unique_handles: 0,
+                        updated_handles: 0,
+                        updated_rows: 0,
+                        inserted_products: 0,
+                        inserted_rows: 0,
+                        missing_in_shopify: 0,
+                        cancel_requested: false,
+                        error_message: null,
+                        started_at: null,
+                        completed_at: null,
+                        updated_at: new Date().toISOString(),
+                    })
+                    .select("*")
+                    .single();
+
+                if (newErr) throw new Error(newErr.message);
+
+                return { ok: true, intent, job: newJob };
+            }
+
+            // If a job exists, just reset it in place and keep it paused
+            const { data: resetJob, error: resetErr } = await supabase
+                .from("sync_jobs")
+                .update({
+                    status: "paused",
+                    batch_offset: 0,
+                    total_master: null,
+                    batches: 0,
+                    unique_handles: 0,
+                    updated_handles: 0,
+                    updated_rows: 0,
+                    inserted_products: 0,
+                    inserted_rows: 0,
+                    missing_in_shopify: 0,
+                    cancel_requested: false,
+                    error_message: null,
+                    started_at: null,
+                    completed_at: null,
+                    updated_at: new Date().toISOString(),
+                })
+                .eq("id", existingJob.id)
+                .select("*")
+                .single();
+
+            if (resetErr) throw new Error(resetErr.message);
+
+            return { ok: true, intent, job: resetJob };
+        } catch (e) {
+            return { ok: false, intent, error: safeErrToString(e) };
+        }
+    }
+
 
     if (intent === "deleteMapping") {
 
@@ -1381,6 +1408,7 @@ export default function GradeCollectionPage() {
         totalCount,
         pageStart,
         pageEnd,
+        syncJob,
     } = data;
 
     const [collectionGradeByProductId, setCollectionGradeByProductId] = useState({});
@@ -1403,55 +1431,47 @@ export default function GradeCollectionPage() {
 
 
     // auto-sync controls
-    const [syncOffset, setSyncOffset] = useState(0);
-    const [autoSyncOn, setAutoSyncOn] = useState(false);
-    const syncLimit = 50;
     const [waveFrozen, setWaveFrozen] = useState(false);
     const [waveBgPos, setWaveBgPos] = useState("0px 0px");
     const waveRef = useRef(null);
 
     // Only show FINAL report when done
-    const [finalReport, setFinalReport] = useState(null);
 
-    // run totals (kept in memory; updated from server response each batch)
-    const [syncTotals, setSyncTotals] = useState({
-        batches: 0,
-        uniqueHandles: 0,
-        updatedHandles: 0,
-        updatedRows: 0,
-        insertedProducts: 0,
-        insertedRows: 0,
-        missingInShopify: 0,
-    });
 
-    const lastBatchIdRef = useRef(0);
-    const latestRunTotalsRef = useRef(syncTotals);
+
 
     // Progress animation (smooth percent count-up)
     const [displayPct, setDisplayPct] = useState(0);
 
-    // Persist offset
-    useEffect(() => {
-        try {
-            const raw = window.localStorage.getItem("master_sync_offset");
-            const n = Number.parseInt(raw || "0", 10);
-            if (Number.isFinite(n) && n >= 0) setSyncOffset(n);
-        } catch {
-            // ignore
-        }
-    }, []);
-
-    useEffect(() => {
-        try {
-            window.localStorage.setItem("master_sync_offset", String(syncOffset));
-        } catch {
-            // ignore
-        }
-    }, [syncOffset]);
-
     const isSaving = fetcher.state !== "idle";
     const isSyncing = syncFetcher.state !== "idle";
     const isSearching = searchFetcher.state !== "idle";
+
+    const currentJob =
+        syncFetcher.state !== "idle"
+            ? (syncFetcher.data?.job || syncJob || null)
+            : (searchFetcher.data?.syncJob || syncJob || null);
+    const currentStatus = currentJob?.status || "idle";
+
+    const isRunning = currentStatus === "queued" || currentStatus === "running";
+    const isPaused = currentStatus === "paused";
+    const alreadyComplete = currentStatus === "completed";
+
+    const currentOffset = Number(currentJob?.batch_offset || 0);
+    const totalForUI = Number(currentJob?.total_master || masterTotal || 0);
+
+    const isCompleted = currentJob?.status === "completed";
+
+    const syncedSoFar = isCompleted
+        ? 0
+        : Math.min(currentOffset, totalForUI || currentOffset);
+
+    const progressPct =
+        isCompleted
+            ? 0
+            : totalForUI > 0
+                ? Math.min(100, Math.round((syncedSoFar / totalForUI) * 100))
+                : 0;
 
     // Track if we're currently searching (not filtering)
     const [isSearchLoading, setIsSearchLoading] = useState(false);
@@ -1460,62 +1480,27 @@ export default function GradeCollectionPage() {
     const saveError = fetcher.data?.ok === false ? fetcher.data.error : null;
 
     const syncError =
-        syncFetcher.data?.intent === "syncGradesBatch" && syncFetcher.data?.ok === false ? syncFetcher.data.error : null;
-
-    // additional error state for stalled auto-sync runs
-    const [syncAllError, setSyncAllError] = useState(null);
-
-    const syncSummary =
-        syncFetcher.data?.intent === "syncGradesBatch" && syncFetcher.data?.ok === true ? syncFetcher.data.summary : null;
-
-    const syncRunTotals =
-        syncFetcher.data?.intent === "syncGradesBatch" && syncFetcher.data?.ok === true ? syncFetcher.data.runTotals : null;
-
-    const syncDone =
-        syncFetcher.data?.intent === "syncGradesBatch" && syncFetcher.data?.ok === true ? !!syncFetcher.data.done : false;
+        syncFetcher.data?.ok === false
+            ? syncFetcher.data.error
+            : currentJob?.status === "failed"
+                ? currentJob?.error_message
+                : null;
 
 
     useEffect(() => {
         setCursorStack([]);
     }, [initialSearchQuery, initialSelectedCollectionId]);
 
-    // Keep totals updated from server response (no per-batch UI rendering)
     useEffect(() => {
-        if (!syncSummary) return;
+        if (!currentJob) return;
+        if (!["queued", "running", "paused"].includes(currentJob.status)) return;
 
-        // update offset from server (authoritative)
-        if (typeof syncSummary.nextOffset === "number") {
-            setSyncOffset(syncSummary.nextOffset);
-        }
+        const timer = setInterval(() => {
+            searchFetcher.load(window.location.pathname + window.location.search);
+        }, 5000);
 
-        // prevent double processing
-        const batchId = (syncSummary.offset ?? 0) + (syncSummary.limit ?? 0);
-        if (batchId === lastBatchIdRef.current) return;
-        lastBatchIdRef.current = batchId;
-
-        if (syncRunTotals) {
-            const nextTotals = {
-                batches: Number(syncRunTotals.batches || 0),
-                uniqueHandles: Number(syncRunTotals.uniqueHandles || 0),
-                updatedHandles: Number(syncRunTotals.updatedHandles || 0),
-                updatedRows: Number(syncRunTotals.updatedRows || 0),
-                insertedProducts: Number(syncRunTotals.insertedProducts || 0),
-                insertedRows: Number(syncRunTotals.insertedRows || 0),
-                missingInShopify: Number(syncRunTotals.missingInShopify || 0),
-            };
-            setSyncTotals(nextTotals);
-            latestRunTotalsRef.current = nextTotals;
-        }
-
-        // If done, show ONLY final report
-        if (syncDone) {
-            setAutoSyncOn(false);
-            setFinalReport({
-                totals: syncRunTotals || latestRunTotalsRef.current,
-                completedAt: new Date().toISOString(),
-            });
-        }
-    }, [syncSummary, syncRunTotals, syncDone]);
+        return () => clearInterval(timer);
+    }, [currentJob, searchFetcher]);
 
     useEffect(() => {
         if (displayPct >= 100 && !waveFrozen) {
@@ -1534,44 +1519,7 @@ export default function GradeCollectionPage() {
         }
     }, [displayPct, waveFrozen]);
 
-    // detect if auto-sync stops unexpectedly (no response/data)
-    useEffect(() => {
-        if (!autoSyncOn) {
-            setSyncAllError(null);
-            return;
-        }
-        // if fetcher is idle but we haven't received data and not currently syncing
-        if (syncFetcher.state === "idle" && syncFetcher.data == null && !isSyncing) {
-            setSyncAllError("Sync stopped unexpectedly. Please check your network or try again.");
-            setAutoSyncOn(false);
-        }
-    }, [autoSyncOn, syncFetcher.state, syncFetcher.data, isSyncing]);
 
-    // Auto-chain batches (STOP button will set autoSyncOn=false, so it stops after current batch)
-    useEffect(() => {
-        if (!autoSyncOn) return;
-        if (isSyncing) return;
-        if (!syncSummary) return;
-
-        if (syncSummary.hasMore) {
-            syncFetcher.submit(
-                {
-                    intent: "syncGradesBatch",
-                    offset: String(syncSummary.nextOffset),
-                    limit: String(syncLimit),
-                    runTotals: JSON.stringify(latestRunTotalsRef.current),
-                },
-                { method: "POST" }
-            );
-        } else {
-            setAutoSyncOn(false);
-            setFinalReport({
-                totals: latestRunTotalsRef.current,
-                completedAt: new Date().toISOString(),
-            });
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [autoSyncOn, isSyncing, syncSummary]);
 
     const collectionOptions = useMemo(() => {
         const filtered = (collections || []).filter((c) =>
@@ -1637,15 +1585,7 @@ export default function GradeCollectionPage() {
     const filteredProducts = products || [];
     const shouldShowPagination = !!after || hasNextPage;
 
-    // progress
-    const totalForUI = syncSummary?.masterTotal ?? masterTotal;
 
-    // completed rows: use server nextOffset when available
-    const completed = typeof syncSummary?.nextOffset === "number" ? syncSummary.nextOffset : syncOffset;
-
-    const syncedSoFar = Math.min(completed, typeof totalForUI === "number" ? totalForUI : completed);
-    const progressPct =
-        typeof totalForUI === "number" && totalForUI > 0 ? Math.min(100, Math.round((syncedSoFar / totalForUI) * 100)) : 0;
 
     // smooth % counter animation
     useEffect(() => {
@@ -1667,75 +1607,43 @@ export default function GradeCollectionPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [progressPct]);
 
-    const alreadyComplete = typeof totalForUI === "number" && totalForUI > 0 && syncOffset >= totalForUI;
+
 
     const startAutoSync = () => {
-        // Workaround: if progress is already full, do not call action (prevents the weird {" error state)
-        if (alreadyComplete) {
-            setAutoSyncOn(false);
-            setFinalReport({
-                totals: latestRunTotalsRef.current,
-                completedAt: new Date().toISOString(),
-                note: "Already completed (offset is at the end). Reset offset if you want to re-run.",
-            });
-            return;
-        }
-
-        setFinalReport(null);
-
-        // reset run totals for THIS run (optional). If you want totals to continue across runs, remove this block.
-        const freshTotals = {
-            batches: 0,
-            uniqueHandles: 0,
-            updatedHandles: 0,
-            updatedRows: 0,
-            insertedProducts: 0,
-            insertedRows: 0,
-            missingInShopify: 0,
-        };
-        setSyncTotals(freshTotals);
-        latestRunTotalsRef.current = freshTotals;
-        lastBatchIdRef.current = 0;
-
-        setAutoSyncOn(true);
         syncFetcher.submit(
             {
-                intent: "syncGradesBatch",
-                offset: String(syncOffset),
-                limit: String(syncLimit),
-                runTotals: JSON.stringify(freshTotals),
+                intent: "startSyncJob",
+                batchLimit: "100",
             },
             { method: "POST" }
         );
     };
 
     const stopAutoSync = () => {
-        setAutoSyncOn(false);
-        // No need to "cancel" fetcher request (not supported reliably). This stops chaining after current batch finishes.
+        syncFetcher.submit(
+            {
+                intent: "pauseSyncJob",
+            },
+            { method: "POST" }
+        );
+    };
+
+    const resumeSync = () => {
+        syncFetcher.submit(
+            {
+                intent: "resumeSyncJob",
+            },
+            { method: "POST" }
+        );
     };
 
     const resetSync = () => {
-        setAutoSyncOn(false);
-        setSyncOffset(0);
-        setFinalReport(null);
-        const freshTotals = {
-            batches: 0,
-            uniqueHandles: 0,
-            updatedHandles: 0,
-            updatedRows: 0,
-            insertedProducts: 0,
-            insertedRows: 0,
-            missingInShopify: 0,
-        };
-        setSyncTotals(freshTotals);
-        latestRunTotalsRef.current = freshTotals;
-        lastBatchIdRef.current = 0;
-        setDisplayPct(0);
-        try {
-            window.localStorage.setItem("master_sync_offset", "0");
-        } catch {
-            // ignore
-        }
+        syncFetcher.submit(
+            {
+                intent: "resetSyncJob",
+            },
+            { method: "POST" }
+        );
     };
 
     const saveRow = (p) => {
@@ -1854,20 +1762,15 @@ export default function GradeCollectionPage() {
                         </Banner>
                     )}
 
-                    {syncAllError && (
-                        <Banner tone="critical" title="Sync halted">
-                            <p>{renderErrorText(syncAllError)}</p>
-                        </Banner>
-                    )}
 
-                    {finalReport && (
-                        <Banner tone="success" title="Sync completed (final report)">
-                            {finalReport.note ? <p>{finalReport.note}</p> : null}
+
+                    {currentJob?.status === "completed" && (
+                        <Banner tone="success" title="Sync completed">
                             <p>
-                                Unique handles: {finalReport.totals?.uniqueHandles || 0} | Updated handles:{" "}
-                                {finalReport.totals?.updatedHandles || 0} | Updated rows: {finalReport.totals?.updatedRows || 0}
+                                Unique handles: {currentJob?.unique_handles || 0} | Updated handles:{" "}
+                                {currentJob?.updated_handles || 0} | Updated rows: {currentJob?.updated_rows || 0}
                             </p>
-                            <p>Not in Shopify: {finalReport.totals?.missingInShopify || 0}</p>
+                            <p>Not in Shopify: {currentJob?.missing_in_shopify || 0}</p>
                         </Banner>
                     )}
 
@@ -1882,35 +1785,20 @@ export default function GradeCollectionPage() {
                                     <InlineStack gap="200" blockAlign="center">
                                         <Button
                                             variant="primary"
-                                            loading={autoSyncOn}
-                                            disabled={isSaving || autoSyncOn || alreadyComplete}
+                                            loading={syncFetcher.state !== "idle"}
+                                            disabled={isSaving || isRunning || alreadyComplete}
                                             onClick={startAutoSync}
                                         >
                                             Sync all
                                         </Button>
 
-                                        {autoSyncOn ? (
-                                            <Button tone="critical" disabled={isSaving} onClick={stopAutoSync}>
-                                                Stop
+                                        {isRunning ? (
+                                            <Button tone="critical" disabled={isSaving || syncFetcher.state !== "idle"} onClick={stopAutoSync}>
+                                                Pause
                                             </Button>
                                         ) : null}
 
-                                        <Button
-                                            disabled={isSaving || isSyncing || autoSyncOn || alreadyComplete}
-                                            onClick={() =>
-                                                syncFetcher.submit(
-                                                    {
-                                                        intent: "syncGradesBatch",
-                                                        offset: String(syncOffset),
-                                                        limit: String(syncLimit),
-                                                        runTotals: JSON.stringify(latestRunTotalsRef.current),
-                                                    },
-                                                    { method: "POST" }
-                                                )
-                                            }
-                                        >
-                                            Sync next {syncLimit}
-                                        </Button>
+
                                     </InlineStack>
                                 </InlineStack>
 
@@ -1918,13 +1806,21 @@ export default function GradeCollectionPage() {
                                     <BlockStack gap="300">
                                         <InlineStack align="space-between">
                                             <Text as="span" tone="subdued">
-                                                {typeof totalForUI === "number"
-                                                    ? `${syncedSoFar} / ${totalForUI}`
-                                                    : `${syncedSoFar} / ?`}
+                                                {alreadyComplete
+                                                    ? "Sync complete"
+                                                    : typeof totalForUI === "number"
+                                                        ? `${syncedSoFar} / ${totalForUI}`
+                                                        : `${syncedSoFar} / ?`}
                                             </Text>
 
                                             <Text as="span" tone="subdued">
-                                                {alreadyComplete ? "Completed" : ""}
+                                                {currentStatus === "paused"
+                                                    ? "Paused"
+                                                    : alreadyComplete
+                                                        ? "Sync complete"
+                                                        : isRunning
+                                                            ? "Running"
+                                                            : ""}
                                             </Text>
                                         </InlineStack>
 
@@ -1948,14 +1844,14 @@ export default function GradeCollectionPage() {
                                         </div>
 
                                         <InlineStack align="space-between">
-                                            <Button size="slim" disabled={isSyncing || !alreadyComplete} onClick={resetSync}>
-                                                Reset offset
+                                            <Button size="slim" disabled={isSyncing || isRunning} onClick={resetSync}>
+                                                Reset sync
                                             </Button>
                                         </InlineStack>
 
                                         {alreadyComplete ? (
                                             <Text as="span" tone="subdued" variant="bodySm">
-                                                Sync is already complete. Click Reset offset to run again.
+                                                Sync is complete. Click Reset sync to start over.
                                             </Text>
                                         ) : null}
 
