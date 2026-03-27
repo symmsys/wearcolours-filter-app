@@ -911,8 +911,20 @@ export const loader = async ({ request }) => {
     const url = new URL(request.url);
     const after = url.searchParams.get("after");
     const q = (url.searchParams.get("q") || "").trim();
-    const collectionId = (url.searchParams.get("collectionId") || "").trim();
-    const page = Math.max(1, Number.parseInt(url.searchParams.get("page") || "1", 10) || 1);
+    const collectionTitleFromUrl = (url.searchParams.get("collection") || "").trim();
+    // const page = Math.max(1, Number.parseInt(url.searchParams.get("page") || "1", 10) || 1);
+
+    const collections = await fetchAllCollections(admin);
+
+    let resolvedCollectionId = "";
+
+    if (collectionTitleFromUrl) {
+        const matchedCollection = (collections || []).find(
+            (c) => String(c.title || "").trim().toLowerCase() === collectionTitleFromUrl.toLowerCase()
+        );
+
+        resolvedCollectionId = matchedCollection?.id || "";
+    }
 
     const {
         items,
@@ -925,14 +937,15 @@ export const loader = async ({ request }) => {
         first: 50,
         after: after || null,
         search: q,
-        collectionId,
+        collectionId: resolvedCollectionId,
     });
-
-    const collections = await fetchAllCollections(admin);
 
     let masterTotal = null;
     try {
-        const { count, error } = await supabase.from(MASTER_TABLE).select('"Handle"', { count: "exact", head: true });
+        const { count, error } = await supabase
+            .from(MASTER_TABLE)
+            .select('"Handle"', { count: "exact", head: true });
+
         if (!error && typeof count === "number") masterTotal = count;
     } catch {
         // ignore
@@ -958,12 +971,11 @@ export const loader = async ({ request }) => {
         shop,
         products: items,
         searchQuery: q,
-        selectedCollectionId: collectionId,
+        selectedCollectionId: resolvedCollectionId,
         collections,
         hasNextPage,
         endCursor,
         after: after || null,
-        page,
         masterTotal,
         totalCount,
         pageStart,
@@ -1364,7 +1376,7 @@ export default function GradeCollectionPage() {
     const syncFetcher = useFetcher(); // syncGradesBatch
     const searchFetcher = useFetcher(); // for search form (to reset pagination)
 
-    const data = searchFetcher.data || loaderData;
+    const data = loaderData;
 
     const {
         shop,
@@ -1422,7 +1434,7 @@ export default function GradeCollectionPage() {
     const currentJob =
         syncFetcher.state !== "idle"
             ? (syncFetcher.data?.job ?? searchFetcher.data?.syncJob ?? syncJob ?? null)
-            : (searchFetcher.data?.syncJob ?? syncFetcher.data?.job ?? syncJob ?? null);
+            : (searchFetcher.data?.syncJob ?? syncJob ?? null);
 
     const currentStatus = currentJob?.status || "idle";
 
@@ -1691,29 +1703,44 @@ export default function GradeCollectionPage() {
             }
 
             if (selectedTrimmed) {
-                params.set("collectionId", selectedTrimmed);
+                const selectedCollection = (collections || []).find(
+                    (c) => String(c.id) === String(selectedTrimmed)
+                );
+
+                const selectedCollectionTitle = String(selectedCollection?.title || "").trim();
+
+                if (selectedCollectionTitle) {
+                    params.set("collection", selectedCollectionTitle);
+                }
+            } else {
+                params.delete("collection");
             }
 
-            params.set("page", "1");
+            params.delete("page");
             params.delete("after");
+            params.delete("collectionId");
 
             const qs = params.toString();
 
-            searchFetcher.load(
+            navigate(
                 qs ? `${window.location.pathname}?${qs}` : window.location.pathname
             );
         }, 400);
 
         return () => clearTimeout(timer);
-    }, [searchQuery, selectedCollectionId, initialSearchQuery, initialSelectedCollectionId]);
-
+    }, [
+        searchQuery,
+        selectedCollectionId,
+        initialSearchQuery,
+        initialSelectedCollectionId,
+        collections,
+        navigate,
+    ]);
     // Reset search loading when fetcher completes
     useEffect(() => {
-        if (searchFetcher.state === "idle") {
-            setIsSearchLoading(false);
-            setIsCollectionFilterLoading(false);
-        }
-    }, [searchFetcher.state]);
+        setIsSearchLoading(false);
+        setIsCollectionFilterLoading(false);
+    }, [initialSearchQuery, initialSelectedCollectionId]);
 
     const getAdminProductUrl = (productGid) => {
         const numericId = getNumericIdFromGid(productGid);
