@@ -20,6 +20,7 @@ export default function App() {
         <s-link href="/home/products">Products</s-link>
         <s-link href="/home/settings">Settings</s-link>
         <s-link href="/home/product-sort">Product Sort</s-link>
+        <s-link href="/home/club-customers">Club Customers</s-link>
       </s-app-nav>
       <Outlet />
     </AppProvider>

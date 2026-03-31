@@ -703,7 +703,23 @@ async function fetchProductsWithGradeAndCollection(
         };
     });
 
-    const { data: savedData, error: fetchErr } = await supabase.from(EXTERNAL_TABLE).select("*");
+    const currentPageProductIds = items
+        .map((item) => cleanText(item.id))
+        .filter(Boolean);
+
+    let savedData = [];
+    let fetchErr = null;
+
+    if (currentPageProductIds.length > 0) {
+        const result = await supabase
+            .from(EXTERNAL_TABLE)
+            .select("*")
+            .in("shopify_product_id", currentPageProductIds);
+
+        savedData = result.data || [];
+        fetchErr = result.error || null;
+    }
+
     if (fetchErr) console.error("Error fetching from Supabase:", fetchErr);
 
     const allProductHandles = items
@@ -763,7 +779,8 @@ async function fetchProductsWithGradeAndCollection(
 
 
 
-    const totalCount = await fetchProductsCount(admin, "");
+    const shouldFetchTotalCount = !after;
+    const totalCount = shouldFetchTotalCount ? await fetchProductsCount(admin, "") : null;
 
     return {
         items: mergedItems,
