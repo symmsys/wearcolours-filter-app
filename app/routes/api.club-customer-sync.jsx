@@ -13,6 +13,29 @@ function jsonResponse(data, init = {}) {
         },
     });
 }
+function normalizePhone(value) {
+    const raw = cleanText(value);
+    if (!raw) return "";
+
+    let normalized = raw.replace(/[^\d+]/g, "");
+
+    if (normalized.includes("+")) {
+        normalized = normalized[0] === "+"
+            ? "+" + normalized.slice(1).replace(/\+/g, "")
+            : normalized.replace(/\+/g, "");
+    }
+
+    if (!normalized.startsWith("+") && /^\d{10}$/.test(normalized)) {
+        normalized = `${normalized}`;
+    }
+
+    if (!/^\+\d{8,15}$/.test(normalized)) {
+        return "";
+    }
+
+    return normalized;
+}
+
 
 function cleanText(value) {
     return String(value ?? "").trim();
@@ -101,14 +124,20 @@ export async function action({ request }) {
         let query = supabase
             .from(TABLE)
             .select(`
-        id,
-        shopify_customer_id,
-        customer_email,
-        customer_first_name,
-        customer_last_name,
-        updated_at,
-        created_at
-      `)
+  id,
+  shopify_customer_id,
+  customer_email,
+  customer_first_name,
+  customer_last_name,
+  parent_phone,
+  shipping_street,
+  shipping_apt,
+  shipping_city,
+  shipping_state,
+  shipping_zip,
+  updated_at,
+  created_at
+`)
             .order("updated_at", { ascending: false })
             .limit(1);
 
@@ -138,6 +167,14 @@ export async function action({ request }) {
 
         const firstName = cleanText(row.customer_first_name);
         const lastName = cleanText(row.customer_last_name);
+        const phone = normalizePhone(row.parent_phone);
+
+        const shippingStreet = cleanText(row.shipping_street);
+        const shippingApt = cleanText(row.shipping_apt);
+        const shippingCity = cleanText(row.shipping_city);
+        const shippingState = cleanText(row.shipping_state);
+        const shippingZip = cleanText(row.shipping_zip);
+
         const customerIdGid = toCustomerGid(row.shopify_customer_id);
 
         if (!customerIdGid) {
@@ -147,9 +184,19 @@ export async function action({ request }) {
             );
         }
 
-        if (!firstName && !lastName) {
+        const hasAnyCustomerData =
+            firstName ||
+            lastName ||
+            phone ||
+            shippingStreet ||
+            shippingApt ||
+            shippingCity ||
+            shippingState ||
+            shippingZip;
+
+        if (!hasAnyCustomerData) {
             return jsonResponse(
-                { ok: false, error: "No first name or last name available to sync" },
+                { ok: false, error: "No customer data available to sync" },
                 { status: 400 }
             );
         }
@@ -157,29 +204,69 @@ export async function action({ request }) {
         const { admin } = await unauthenticated.admin(shop);
 
         const mutation = `#graphql
-      mutation customerUpdate($input: CustomerInput!) {
-        customerUpdate(input: $input) {
-          customer {
-            id
-            firstName
-            lastName
-            email
-          }
-          userErrors {
-            field
-            message
+  mutation customerUpdate($input: CustomerInput!) {
+    customerUpdate(input: $input) {
+      customer {
+        id
+        firstName
+        lastName
+        email
+        phone
+        addressesV2(first: 10) {
+          edges {
+            node {
+              id
+              address1
+              address2
+              city
+              province
+              zip
+              phone
+            }
           }
         }
       }
-    `;
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
 
-        const variables = {
-            input: {
-                id: customerIdGid,
+
+
+        const input = {
+            id: customerIdGid,
+        };
+
+        if (firstName) input.firstName = firstName;
+        if (lastName) input.lastName = lastName;
+        if (phone) input.phone = phone;
+
+        const hasShippingAddress =
+            shippingStreet || shippingApt || shippingCity || shippingState || shippingZip;
+
+        if (hasShippingAddress) {
+            const address = {
+                address1: shippingStreet,
+                address2: shippingApt,
+                city: shippingCity,
+                province: shippingState,
+                zip: shippingZip,
+                country: "United States", // change if needed
                 firstName,
                 lastName,
-            },
-        };
+            };
+
+            if (phone) {
+                address.phone = phone;
+            }
+
+            input.addresses = [address];
+        }
+
+        const variables = { input };
 
         const response = await admin.graphql(mutation, { variables });
         const result = await response.json();
@@ -205,6 +292,12 @@ export async function action({ request }) {
                 customer_email: row.customer_email,
                 customer_first_name: firstName,
                 customer_last_name: lastName,
+                parent_phone: phone,
+                shipping_street: shippingStreet,
+                shipping_apt: shippingApt,
+                shipping_city: shippingCity,
+                shipping_state: shippingState,
+                shipping_zip: shippingZip,
             },
             customer: payload?.customer || null,
         });
