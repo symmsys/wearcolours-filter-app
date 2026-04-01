@@ -19,6 +19,12 @@ const HOME_CARDS = [
     path: "/home/product-sort",
     icon: "drag",
   },
+  {
+    title: "Club Customers",
+    desc: "Manage club customer profiles.",
+    path: "/home/club-customers",
+    icon: "user",
+  },
 ];
 
 const LOGO_SRC = "/Colours_UNIFORMS-Logo.jpg";
@@ -62,6 +68,9 @@ function getIcon(type) {
     return <span>↕️</span>;
   }
 
+  if (type === "user") {
+    return <span>👤</span>;
+  }
   return <span>•</span>;
 }
 

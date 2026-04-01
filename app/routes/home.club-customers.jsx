@@ -27,12 +27,132 @@ function formatLabel(str) {
         .replace(/_/g, " ")
         .replace(/\b\w/g, (c) => c.toUpperCase());
 }
+function formatValue(value) {
+    if (value === null || value === undefined || value === "") return "-";
+    if (typeof value === "boolean") return value ? "Yes" : "No";
+    if (Array.isArray(value)) return value.length ? JSON.stringify(value, null, 2) : "-";
+    if (value && typeof value === "object") return JSON.stringify(value, null, 2);
+    return String(value);
+}
 
-function formatValue(v) {
-    if (v === null || v === undefined || v === "") return "-";
-    if (typeof v === "boolean") return v ? "Yes" : "No";
-    if (typeof v === "object") return JSON.stringify(v, null, 2);
-    return String(v);
+function isPlainObject(value) {
+    return value && typeof value === "object" && !Array.isArray(value);
+}
+
+function formatPrimitiveValue(value) {
+    if (value === null || value === undefined || value === "") return "-";
+    if (typeof value === "boolean") return value ? "Yes" : "No";
+    return String(value);
+}
+
+function renderObjectList(obj) {
+    const entries = Object.entries(obj || {});
+    if (!entries.length) return <div>-</div>;
+
+    return (
+        <div style={{ display: "grid", gap: 8 }}>
+            {entries.map(([k, v]) => (
+                <div
+                    key={k}
+                    style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        padding: "8px 10px",
+                        background: "#f6f6f7",
+                        borderRadius: 8,
+                    }}
+                >
+                    <div style={{ fontWeight: 600 }}>{formatLabel(k)}</div>
+                    <div>{formatPrimitiveValue(v)}</div>
+                </div>
+            ))}
+        </div>
+    );
+}
+
+function renderNestedSizeObject(obj) {
+    const entries = Object.entries(obj || {});
+    if (!entries.length) return <div>-</div>;
+
+    return (
+        <div style={{ display: "grid", gap: 12 }}>
+            {entries.map(([itemName, details]) => (
+                <div
+                    key={itemName}
+                    style={{
+                        border: "1px solid #e1e3e5",
+                        borderRadius: 10,
+                        padding: 12,
+                        background: "#fff",
+                    }}
+                >
+                    <div style={{ fontWeight: 700, marginBottom: 10 }}>
+                        {formatLabel(itemName)}
+                    </div>
+
+                    {isPlainObject(details) ? (
+                        <div style={{ display: "grid", gap: 8 }}>
+                            {Object.entries(details).map(([k, v]) => (
+                                <div
+                                    key={k}
+                                    style={{
+                                        display: "flex",
+                                        justifyContent: "space-between",
+                                        gap: 12,
+                                        padding: "6px 0",
+                                        borderTop: "1px solid #f1f1f1",
+                                    }}
+                                >
+                                    <div style={{ fontWeight: 600 }}>{formatLabel(k)}</div>
+                                    <div>{formatPrimitiveValue(v)}</div>
+                                </div>
+                            ))}
+                        </div>
+                    ) : (
+                        <div>{formatPrimitiveValue(details)}</div>
+                    )}
+                </div>
+            ))}
+        </div>
+    );
+}
+
+function renderStudentField(key, value) {
+    if (key === "items" && isPlainObject(value)) {
+        return renderObjectList(value);
+    }
+
+    if (key === "sizes" && isPlainObject(value)) {
+        return renderNestedSizeObject(value);
+    }
+
+    if (Array.isArray(value)) {
+        if (!value.length) return <div>-</div>;
+
+        return (
+            <div style={{ display: "grid", gap: 8 }}>
+                {value.map((item, index) => (
+                    <div
+                        key={index}
+                        style={{
+                            padding: "8px 10px",
+                            background: "#f6f6f7",
+                            borderRadius: 8,
+                        }}
+                    >
+                        {isPlainObject(item) ? renderObjectList(item) : formatPrimitiveValue(item)}
+                    </div>
+                ))}
+            </div>
+        );
+    }
+
+    if (isPlainObject(value)) {
+        return renderObjectList(value);
+    }
+
+    return <div>{formatPrimitiveValue(value)}</div>;
 }
 
 function normalizeStudents(rows = []) {
@@ -333,7 +453,7 @@ function CustomerDrawer({ open, onClose, data, loading }) {
                     position: "fixed",
                     top: 0,
                     right: 0,
-                    width: "500px",
+                    width: "60%",
                     maxWidth: "100%",
                     height: "100vh",
                     background: "#fff",
@@ -387,11 +507,11 @@ function CustomerDrawer({ open, onClose, data, loading }) {
                                         </div>
 
                                         {Object.entries(student).map(([key, value]) => (
-                                            <div key={key} style={{ marginBottom: 10 }}>
-                                                <div style={{ fontWeight: 600, marginBottom: 3 }}>
+                                            <div key={key} style={{ marginBottom: 14 }}>
+                                                <div style={{ fontWeight: 600, marginBottom: 6 }}>
                                                     {formatLabel(key)}
                                                 </div>
-                                                <div>{formatValue(value)}</div>
+                                                {renderStudentField(key, value)}
                                             </div>
                                         ))}
                                     </div>
