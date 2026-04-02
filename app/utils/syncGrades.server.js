@@ -3,6 +3,18 @@ import { getSupabaseAdmin } from "../supabase.server";
 const EXTERNAL_TABLE = "product_grade_collection";
 const MASTER_TABLE = "master database colours";
 
+const COLLECTION_GID_TO_SCHOOL = {
+    "gid://shopify/Collection/276875411527": "Regina Dominican",
+    "gid://shopify/Collection/282935689287": "FSHA",
+    "gid://shopify/Collection/276875509831": "AOLP",
+    "gid://shopify/Collection/276875280455": "Castilleja",
+    "gid://shopify/Collection/276875444295": "NDB",
+    "gid://shopify/Collection/276875247687": "Marlborough",
+};
+
+const PRODUCT_SIZE_TYPE_BUTTONS_NAMESPACE = "custom";
+const PRODUCT_SIZE_TYPE_BUTTONS_KEY = "product_size_type_buttons";
+
 function cleanText(v) {
     return String(v ?? "").trim();
 }
@@ -23,6 +35,41 @@ function uniqStrings(arr) {
     }
 
     return out;
+}
+
+function parseProductHandlesFromMetafield(value) {
+    const raw = cleanText(value);
+    if (!raw) return [];
+
+    const out = [];
+
+    for (const part of raw.split(",")) {
+        const item = cleanText(part);
+        if (!item) continue;
+
+        const pieces = item.split(":");
+        const handle = cleanText(pieces[pieces.length - 1]);
+        if (handle) out.push(handle);
+    }
+
+    return uniqStrings(out);
+}
+
+function getAllowedSchoolTagFromCollections(collections = []) {
+    for (const c of collections || []) {
+        const schoolTag = COLLECTION_GID_TO_SCHOOL[String(c?.id || "")];
+        if (schoolTag) {
+            return {
+                schoolTag,
+                parentCollection: c,
+            };
+        }
+    }
+
+    return {
+        schoolTag: null,
+        parentCollection: null,
+    };
 }
 
 async function parseGraphql(res, { nodeGetter, nodeName = "operations" } = {}) {
@@ -58,6 +105,9 @@ async function fetchProductByHandleWithCollectionsAndSizes(admin, handle) {
           id
           title
           handle
+          metafield(namespace: "custom", key: "product_size_type_buttons") {
+    value
+  }
           variants(first: 250) {
             edges { node { selectedOptions { name value } } }
           }
@@ -138,6 +188,7 @@ async function fetchProductByHandleWithCollectionsAndSizes(admin, handle) {
         handle: p.handle || "",
         sizes: uniqStrings(sizes),
         collections: uniqCols,
+        product_size_type_buttons: cleanText(p?.metafield?.value),
     };
 }
 
@@ -256,6 +307,36 @@ export async function processOneSyncBatch({ admin, jobId }) {
         const handleRaw = entry?.handleRaw || hKey;
         const grade = cleanText(entry?.grade);
 
+        const prod = await fetchProductByHandleWithCollectionsAndSizes(admin, handleRaw);
+
+        if (!prod?.id) {
+            missingInShopify += 1;
+            continue;
+        }
+
+        const directSchool = getAllowedSchoolTagFromCollections(prod.collections || []);
+        let schoolTagValue = directSchool.schoolTag || null;
+        let parentHandleValue = null;
+
+        const relatedHandles = parseProductHandlesFromMetafield(prod.product_size_type_buttons);
+        const currentHandleLower = cleanText(prod.handle || handleRaw).toLowerCase();
+
+        if (!schoolTagValue) {
+            for (const relatedHandle of relatedHandles) {
+                if (cleanText(relatedHandle).toLowerCase() === currentHandleLower) continue;
+
+                const siblingProd = await fetchProductByHandleWithCollectionsAndSizes(admin, relatedHandle);
+                if (!siblingProd?.id) continue;
+
+                const siblingSchool = getAllowedSchoolTagFromCollections(siblingProd.collections || []);
+                if (siblingSchool.schoolTag) {
+                    parentHandleValue = cleanText(siblingProd.handle);
+                    schoolTagValue = siblingSchool.schoolTag;
+                    break;
+                }
+            }
+        }
+
         const { data: existing, error: existErr } = await supabase
             .from(EXTERNAL_TABLE)
             .select("id,size")
@@ -281,6 +362,8 @@ export async function processOneSyncBatch({ admin, jobId }) {
                 .update({
                     grade: grade || null,
                     size: mergedSizeArray.length ? mergedSizeArray : null,
+                    school_tag: schoolTagValue || null,
+                    parent_handel: parentHandleValue || null,
                     updated_at: new Date().toISOString(),
                 })
                 .ilike("product_handle", handleRaw)
@@ -295,12 +378,7 @@ export async function processOneSyncBatch({ admin, jobId }) {
             continue;
         }
 
-        const prod = await fetchProductByHandleWithCollectionsAndSizes(admin, handleRaw);
 
-        if (!prod?.id) {
-            missingInShopify += 1;
-            continue;
-        }
 
         const cols = prod.collections || [];
         if (cols.length === 0) continue;
@@ -314,6 +392,8 @@ export async function processOneSyncBatch({ admin, jobId }) {
             collection_handle: c.handle || null,
             grade: grade || null,
             size: prod.sizes && prod.sizes.length ? prod.sizes : null,
+            school_tag: schoolTagValue || null,
+            parent_handel: parentHandleValue || null,
             updated_at: new Date().toISOString(),
         }));
 

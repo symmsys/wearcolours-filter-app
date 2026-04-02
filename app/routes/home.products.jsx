@@ -86,6 +86,64 @@ function cleanText(v) {
     return String(v ?? "").trim();
 }
 
+function getAllowedSchoolNames() {
+    return Object.values(COLLECTION_GID_TO_SCHOOL).map((v) => cleanText(v)).filter(Boolean);
+}
+
+function resolveSchoolTag({ dbSchoolTag = "", shopifyTags = [] }) {
+    const dbValue = cleanText(dbSchoolTag);
+    if (dbValue) return dbValue;
+
+    const allowedSchools = new Set(
+        getAllowedSchoolNames().map((v) => v.toLowerCase())
+    );
+
+    for (const tag of shopifyTags || []) {
+        const cleanTag = cleanText(tag);
+        if (!cleanTag) continue;
+
+        if (allowedSchools.has(cleanTag.toLowerCase())) {
+            return cleanTag;
+        }
+    }
+
+    return "";
+}
+
+function resolveSchoolTagFromShopify(shopifyTags = []) {
+    const allowedSchools = new Set(
+        getAllowedSchoolNames().map((v) => v.toLowerCase())
+    );
+
+    for (const tag of shopifyTags || []) {
+        const cleanTag = cleanText(tag);
+        if (!cleanTag) continue;
+
+        if (allowedSchools.has(cleanTag.toLowerCase())) {
+            return cleanTag;
+        }
+    }
+
+    return "";
+}
+
+function buildShopifyProductQuery({ search = "", school = "" }) {
+    const parts = [];
+
+    const cleanSearch = cleanText(search);
+    const cleanSchool = cleanText(school);
+
+    if (cleanSearch) {
+        parts.push(cleanSearch);
+    }
+
+    if (cleanSchool) {
+        parts.push(`tag:'${cleanSchool.replace(/'/g, "\\'")}'`);
+    }
+
+    return parts.join(" AND ");
+}
+
 function toInt(v, fallback = 0) {
     const n = Number.parseInt(String(v ?? ""), 10);
     return Number.isFinite(n) ? n : fallback;
@@ -314,7 +372,7 @@ async function fetchShopifySizeRangeFallbackMap(admin, handles = []) {
 async function fetchProductsWithGradeAndCollection(
     admin,
     supabase,
-    { first = 50, after = null, search = "", collectionId = "" } = {}
+    { first = 50, after = null, search = "", school = "" } = {}
 ) {
     const searchText = String(search || "").trim();
 
@@ -331,6 +389,7 @@ async function fetchProductsWithGradeAndCollection(
             id
             title
             handle
+            tags
             metafield(namespace: "${GRADE_NAMESPACE}", key: "${GRADE_KEY}") { value }
             featuredImage { url altText }
             variants(first: 250) {
@@ -348,7 +407,10 @@ async function fetchProductsWithGradeAndCollection(
                 variables: {
                     first,
                     after,
-                    query: searchText,
+                    query: buildShopifyProductQuery({
+                        search: searchText,
+                        school,
+                    }),
                 },
             }
         );
@@ -387,9 +449,7 @@ async function fetchProductsWithGradeAndCollection(
 
         let savedQuery = supabase.from(EXTERNAL_TABLE).select("*").in("product_handle", allHandles);
 
-        if (collectionId) {
-            savedQuery = savedQuery.eq("collection_id", collectionId);
-        }
+
 
         const { data: savedData, error: savedErr } = await savedQuery;
         if (savedErr) throw new Error(savedErr.message);
@@ -408,6 +468,7 @@ async function fetchProductsWithGradeAndCollection(
                         title: record.collection_title,
                         handle: record.collection_handle || "",
                         grade: record.grade || "",
+                        school_tag: record.school_tag || "",
                     });
                 }
             }
@@ -446,6 +507,10 @@ async function fetchProductsWithGradeAndCollection(
                     title: p.title || "",
                     handle: p.handle || "",
                     grade: p?.metafield?.value || "",
+                    shopify_tags: Array.isArray(p?.tags) ? p.tags : [],
+                    school_tag: resolveSchoolTagFromShopify(
+                        Array.isArray(p?.tags) ? p.tags : []
+                    ),
                     imageUrl: p?.featuredImage?.url || "",
                     size: collectArray("size"),
                     size_type: firstValue("size type"),
@@ -460,12 +525,9 @@ async function fetchProductsWithGradeAndCollection(
                     savedCollections,
                 };
             })
-            .filter((p) => {
-                if (!collectionId) return true;
-                return (p.savedCollections || []).some((c) => String(c.id) === String(collectionId));
-            });
 
-        const totalCount = await fetchProductsCount(admin, searchText);
+
+        const totalCount = await fetchProductsCount(admin, searchText, school);
 
         return {
             items: products,
@@ -475,174 +537,182 @@ async function fetchProductsWithGradeAndCollection(
         };
     }
 
-    if (!searchText && collectionId) {
-        const numericOffset = Number.isFinite(Number(after)) ? Number(after) : 0;
+    // if (!searchText && collectionId) {
+    // //     const numericOffset = Number.isFinite(Number(after)) ? Number(after) : 0;
 
-        const { data: matchedRows, error: matchErr } = await supabase
-            .from(EXTERNAL_TABLE)
-            .select(`
-            shopify_product_id,
-            product_title,
-            product_handle,
-            collection_id,
-            collection_title,
-            collection_handle,
-            grade
-        `)
-            .eq("collection_id", collectionId)
-            .order("product_title", { ascending: true });
+    // //     const { data: matchedRows, error: matchErr } = await supabase
+    // //         .from(EXTERNAL_TABLE)
+    // //             .select(`
+    // //             shopify_product_id,
+    // //             product_title,
+    // //             product_handle,
+    // //             collection_id,
+    // //             collection_title,
+    // //             collection_handle,
+    // //             grade,
+    // //             school_tag
+    // //         `)
+    // //         .eq("collection_id", collectionId)
+    // //         .order("product_title", { ascending: true });
 
-        if (matchErr) throw new Error(matchErr.message);
+    // //     if (matchErr) throw new Error(matchErr.message);
 
-        const uniqueHandleMap = new Map();
+    // //     const uniqueHandleMap = new Map();
 
-        for (const row of matchedRows || []) {
-            const handle = cleanText(row?.product_handle);
-            if (!handle) continue;
+    // //     for (const row of matchedRows || []) {
+    // //         const handle = cleanText(row?.product_handle);
+    // //         if (!handle) continue;
 
-            const key = handle.toLowerCase();
+    // //         const key = handle.toLowerCase();
 
-            if (!uniqueHandleMap.has(key)) {
-                uniqueHandleMap.set(key, {
-                    id: row?.shopify_product_id || "",
-                    handle,
-                    title: row?.product_title || "",
-                    collection_id: cleanText(row?.collection_id),
-                    collection_title: cleanText(row?.collection_title),
-                    collection_handle: cleanText(row?.collection_handle),
-                    grade: cleanText(row?.grade),
-                });
-            }
-        }
+    // //         if (!uniqueHandleMap.has(key)) {
+    // //             uniqueHandleMap.set(key, {
+    // //                 id: row?.shopify_product_id || "",
+    // //                 handle,
+    // //                 title: row?.product_title || "",
+    // //                 collection_id: cleanText(row?.collection_id),
+    // //                 collection_title: cleanText(row?.collection_title),
+    // //                 collection_handle: cleanText(row?.collection_handle),
+    // //                 grade: cleanText(row?.grade),
+    // //                 school_tag: cleanText(row?.school_tag),
+    // //             });
+    // //         }
+    // //     }
 
-        const matchedProducts = Array.from(uniqueHandleMap.values());
+    // //     const matchedProducts = Array.from(uniqueHandleMap.values());
 
-        const totalCount = matchedProducts.length;
+    // //     const totalCount = matchedProducts.length;
 
-        if (!matchedProducts.length) {
-            return {
-                items: [],
-                hasNextPage: false,
-                endCursor: null,
-                totalCount: 0,
-                pageStart: 0,
-                pageEnd: 0,
-            };
-        }
+    // //     if (!matchedProducts.length) {
+    // //         return {
+    // //             items: [],
+    // //             hasNextPage: false,
+    // //             endCursor: null,
+    // //             totalCount: 0,
+    // //             pageStart: 0,
+    // //             pageEnd: 0,
+    // //         };
+    // //     }
 
-        const pagedMatches = matchedProducts.slice(numericOffset, numericOffset + first);
-        const nextOffset = numericOffset + first;
-        const hasNextPage = nextOffset < matchedProducts.length;
+    // //     const pagedMatches = matchedProducts.slice(numericOffset, numericOffset + first);
+    // //     const nextOffset = numericOffset + first;
+    // //     const hasNextPage = nextOffset < matchedProducts.length;
 
-        const handles = pagedMatches
-            .map((entry) => cleanText(entry.handle))
-            .filter(Boolean);
+    // //     const handles = pagedMatches
+    // //         .map((entry) => cleanText(entry.handle))
+    // //         .filter(Boolean);
 
-        const ageSizeRangeMap = await fetchAgeSizeRangeMap(supabase, handles);
-        const missingAgeSizeHandles = handles.filter(
-            (handle) => !cleanText(ageSizeRangeMap[cleanText(handle).toLowerCase()])
-        );
+    // //     const ageSizeRangeMap = await fetchAgeSizeRangeMap(supabase, handles);
+    // //     const missingAgeSizeHandles = handles.filter(
+    // //         (handle) => !cleanText(ageSizeRangeMap[cleanText(handle).toLowerCase()])
+    // //     );
 
-        const shopifySizeFallbackMap = missingAgeSizeHandles.length
-            ? await fetchShopifySizeRangeFallbackMap(admin, missingAgeSizeHandles)
-            : {};
+    // //     const shopifySizeFallbackMap = missingAgeSizeHandles.length
+    // //         ? await fetchShopifySizeRangeFallbackMap(admin, missingAgeSizeHandles)
+    // //         : {};
 
-        const products = [];
+    // //     const products = [];
 
-        for (const entry of pagedMatches) {
-            const res = await admin.graphql(
-                `#graphql
-            query ProductByHandle($handle: String!) {
-              productByHandle(handle: $handle) {
-                id
-                title
-                handle
-                metafield(namespace: "${GRADE_NAMESPACE}", key: "${GRADE_KEY}") { value }
-                featuredImage { url altText }
-                variants(first: 250) {
-                  edges { node { selectedOptions { name value } } }
-                }
-              }
-            }
-            `,
-                { variables: { handle: entry.handle } }
-            );
+    // //     for (const entry of pagedMatches) {
+    // //         const res = await admin.graphql(
+    // //             `#graphql
+    // //         query ProductByHandle($handle: String!) {
+    // //           productByHandle(handle: $handle) {
+    // //             id
+    // //             title
+    // //             handle
+    // //             tags
+    // //             metafield(namespace: "${GRADE_NAMESPACE}", key: "${GRADE_KEY}") { value }
+    // //             featuredImage { url altText }
+    // //             variants(first: 250) {
+    // //               edges { node { selectedOptions { name value } } }
+    // //             }
+    // //           }
+    // //         }
+    // //         `,
+    // //             { variables: { handle: entry.handle } }
+    // //         );
 
-            const json = await parseGraphql(res);
-            const p = json?.data?.productByHandle;
+    // //         const json = await parseGraphql(res);
+    // //         const p = json?.data?.productByHandle;
 
-            if (!p?.id) continue;
+    // //         if (!p?.id) continue;
 
-            const variantEdges = p?.variants?.edges || [];
+    // //         const variantEdges = p?.variants?.edges || [];
 
-            const collectArray = (optName) => {
-                const vals = [];
-                for (const ve of variantEdges) {
-                    const opts = ve?.node?.selectedOptions || [];
-                    for (const o of opts) {
-                        if (String(o.name || "").toLowerCase() === optName) vals.push(o.value);
-                    }
-                }
-                return Array.from(new Set(vals)).filter((v) => v != null && String(v).trim() !== "");
-            };
+    // //         const collectArray = (optName) => {
+    // //             const vals = [];
+    // //             for (const ve of variantEdges) {
+    // //                 const opts = ve?.node?.selectedOptions || [];
+    // //                 for (const o of opts) {
+    // //                     if (String(o.name || "").toLowerCase() === optName) vals.push(o.value);
+    // //                 }
+    // //             }
+    // //             return Array.from(new Set(vals)).filter((v) => v != null && String(v).trim() !== "");
+    // //         };
 
-            const firstValue = (optName) => {
-                for (const ve of variantEdges) {
-                    const opts = ve?.node?.selectedOptions || [];
-                    for (const o of opts) {
-                        if (String(o.name || "").toLowerCase() === optName && o.value) return o.value;
-                    }
-                }
-                return null;
-            };
+    // //         const firstValue = (optName) => {
+    // //             for (const ve of variantEdges) {
+    // //                 const opts = ve?.node?.selectedOptions || [];
+    // //                 for (const o of opts) {
+    // //                     if (String(o.name || "").toLowerCase() === optName && o.value) return o.value;
+    // //                 }
+    // //             }
+    // //             return null;
+    // //         };
 
-            products.push({
-                id: p.id,
-                title: p.title || entry.title || "",
-                handle: p.handle || entry.handle || "",
-                grade: entry.grade || p?.metafield?.value || "",
-                imageUrl: p?.featuredImage?.url || "",
-                size: collectArray("size"),
-                size_type: firstValue("size type"),
-                size_range: firstValue("size range"),
-                age_size_range:
-                    ageSizeRangeMap[cleanText(p.handle).toLowerCase()] ||
-                    shopifySizeFallbackMap[cleanText(p.handle).toLowerCase()] ||
-                    "",
-                collectionId: entry.collection_id || "",
-                collectionTitle: entry.collection_title || "",
-                collectionHandle: entry.collection_handle || "",
-                savedCollections: [
-                    {
-                        id: entry.collection_id || "",
-                        title: entry.collection_title || "",
-                        handle: entry.collection_handle || "",
-                        grade: entry.grade || "",
-                    },
-                ],
-            });
-        }
+    // //         products.push({
+    // //             id: p.id,
+    // //             title: p.title || entry.title || "",
+    // //             handle: p.handle || entry.handle || "",
+    // //             grade: entry.grade || p?.metafield?.value || "",
+    // //             shopify_tags: Array.isArray(p?.tags) ? p.tags : [],
+    // //             school_tag: resolveSchoolTagFromShopify(
+    // //                 Array.isArray(p?.tags) ? p.tags : []
+    // //             ),
+    // //             imageUrl: p?.featuredImage?.url || "",
+    // //             size: collectArray("size"),
+    // //             size_type: firstValue("size type"),
+    // //             size_range: firstValue("size range"),
+    // //             age_size_range:
+    // //                 ageSizeRangeMap[cleanText(p.handle).toLowerCase()] ||
+    // //                 shopifySizeFallbackMap[cleanText(p.handle).toLowerCase()] ||
+    // //                 "",
+    // //             collectionId: entry.collection_id || "",
+    // //             collectionTitle: entry.collection_title || "",
+    // //             collectionHandle: entry.collection_handle || "",
+    // //             savedCollections: [
+    // //                 {
+    // //                     id: entry.collection_id || "",
+    // //                     title: entry.collection_title || "",
+    // //                     handle: entry.collection_handle || "",
+    // //                     grade: entry.grade || "",
+    // //                 },
+    // //             ],
+    // //         });
+    // //     }
 
-        return {
-            items: products,
-            hasNextPage,
-            endCursor: hasNextPage ? String(nextOffset) : null,
-            totalCount,
-            pageStart: totalCount ? numericOffset + 1 : 0,
-            pageEnd: Math.min(numericOffset + products.length, totalCount),
-        };
-    }
+    // //     return {
+    // //         items: products,
+    // //         hasNextPage,
+    // //         endCursor: hasNextPage ? String(nextOffset) : null,
+    // //         totalCount,
+    // //         pageStart: totalCount ? numericOffset + 1 : 0,
+    // //         pageEnd: Math.min(numericOffset + products.length, totalCount),
+    // //     };
+    // // }
 
     const res = await admin.graphql(
         `#graphql
-      query Products($first: Int!, $after: String) {
-        products(first: $first, after: $after, sortKey: TITLE) {
+      query Products($first: Int!, $after: String, $query: String) {
+  products(first: $first, after: $after, query: $query, sortKey: TITLE) {
           pageInfo { hasNextPage endCursor }
           edges {
             node {
               id
               title
               handle
+              tags
               metafield(namespace: "${GRADE_NAMESPACE}", key: "${GRADE_KEY}") { value }
               featuredImage { url altText }
               variants(first: 250) {
@@ -656,7 +726,16 @@ async function fetchProductsWithGradeAndCollection(
         }
       }
     `,
-        { variables: { first, after } }
+        {
+            variables: {
+                first,
+                after,
+                query: buildShopifyProductQuery({
+                    search: "",
+                    school,
+                }) || null,
+            },
+        }
     );
 
     const json = await parseGraphql(res);
@@ -693,6 +772,7 @@ async function fetchProductsWithGradeAndCollection(
             title: p.title || "",
             handle: p.handle || "",
             grade: p?.metafield?.value || "",
+            shopify_tags: Array.isArray(p?.tags) ? p.tags : [],
             imageUrl: p?.featuredImage?.url || "",
             size: collectArray("size"),
             size_type: firstValue("size type"),
@@ -747,6 +827,7 @@ async function fetchProductsWithGradeAndCollection(
                     title: record.collection_title,
                     handle: record.collection_handle || "",
                     grade: record.grade || "",
+                    school_tag: record.school_tag || "",
                 });
             }
         }
@@ -763,6 +844,7 @@ async function fetchProductsWithGradeAndCollection(
             return {
                 ...item,
                 age_size_range: ageSizeRange,
+                school_tag: resolveSchoolTagFromShopify(item.shopify_tags || []),
                 collectionId: savedCollections[0]?.id || "",
                 collectionTitle: savedCollections[0]?.title || "",
                 collectionHandle: savedCollections[0]?.handle || "",
@@ -773,6 +855,7 @@ async function fetchProductsWithGradeAndCollection(
         return {
             ...item,
             age_size_range: ageSizeRange,
+            school_tag: resolveSchoolTagFromShopify(item.shopify_tags || []),
             savedCollections: [],
         };
     });
@@ -780,8 +863,7 @@ async function fetchProductsWithGradeAndCollection(
 
 
     const shouldFetchTotalCount = !after;
-    const totalCount = shouldFetchTotalCount ? await fetchProductsCount(admin, "") : null;
-
+    const totalCount = shouldFetchTotalCount ? await fetchProductsCount(admin, "", school) : null;
     return {
         items: mergedItems,
         hasNextPage: !!conn?.pageInfo?.hasNextPage,
@@ -882,6 +964,33 @@ async function fetchProductByHandleWithCollectionsAndSizes(admin, handle) {
     };
 }
 
+async function fetchShopifySchoolTagByHandle(admin, handle) {
+    const cleanHandle = cleanText(handle);
+    if (!cleanHandle) return "";
+
+    const res = await admin.graphql(
+        `#graphql
+        query ProductSchoolTags($handle: String!) {
+          productByHandle(handle: $handle) {
+            id
+            handle
+            tags
+          }
+        }
+        `,
+        { variables: { handle: cleanHandle } }
+    );
+
+    const json = await parseGraphql(res);
+    const product = json?.data?.productByHandle;
+
+    if (!product) return "";
+
+    return resolveSchoolTagFromShopify(
+        Array.isArray(product.tags) ? product.tags : []
+    );
+}
+
 function safeErrToString(e) {
     if (!e) return "Unknown error";
     if (typeof e === "string") return e;
@@ -893,7 +1002,7 @@ function safeErrToString(e) {
     }
 }
 
-async function fetchProductsCount(admin, search = "") {
+async function fetchProductsCount(admin, search = "", school = "") {
     try {
         const res = await admin.graphql(
             `#graphql
@@ -905,7 +1014,10 @@ async function fetchProductsCount(admin, search = "") {
             `,
             {
                 variables: {
-                    query: search ? String(search) : null,
+                    query: buildShopifyProductQuery({
+                        search,
+                        school,
+                    }) || null,
                 },
             }
         );
@@ -928,20 +1040,12 @@ export const loader = async ({ request }) => {
     const url = new URL(request.url);
     const after = url.searchParams.get("after");
     const q = (url.searchParams.get("q") || "").trim();
-    const collectionTitleFromUrl = (url.searchParams.get("collection") || "").trim();
+    const schoolFromUrl = (url.searchParams.get("school") || "").trim();
     // const page = Math.max(1, Number.parseInt(url.searchParams.get("page") || "1", 10) || 1);
 
     const collections = await fetchAllCollections(admin);
 
-    let resolvedCollectionId = "";
 
-    if (collectionTitleFromUrl) {
-        const matchedCollection = (collections || []).find(
-            (c) => String(c.title || "").trim().toLowerCase() === collectionTitleFromUrl.toLowerCase()
-        );
-
-        resolvedCollectionId = matchedCollection?.id || "";
-    }
 
     const {
         items,
@@ -954,7 +1058,7 @@ export const loader = async ({ request }) => {
         first: 50,
         after: after || null,
         search: q,
-        collectionId: resolvedCollectionId,
+        school: schoolFromUrl,
     });
 
     let masterTotal = null;
@@ -988,7 +1092,7 @@ export const loader = async ({ request }) => {
         shop,
         products: items,
         searchQuery: q,
-        selectedCollectionId: resolvedCollectionId,
+        selectedSchool: schoolFromUrl,
         collections,
         hasNextPage,
         endCursor,
@@ -1169,7 +1273,7 @@ export const action = async ({ request }) => {
                         job_type: "grade_sync",
                         status: "paused",
                         batch_offset: 0,
-                        batch_limit: 200,
+                        batch_limit: 100,
                         total_master: null,
                         batches: 0,
                         unique_handles: 0,
@@ -1337,6 +1441,8 @@ export const action = async ({ request }) => {
             }
         }
 
+        const resolvedSchoolTag = await fetchShopifySchoolTagByHandle(admin, productHandle);
+
         const upsertRecords = collectionGradesList.map((item) => ({
             shopify_product_id: productId,
             product_title: productTitle || null,
@@ -1345,6 +1451,8 @@ export const action = async ({ request }) => {
             collection_id: item.id || null,
             collection_title: item.title || null,
             collection_handle: String(item.handle ?? "").trim() || null,
+
+            school_tag: resolvedSchoolTag || null,
 
             grade: String(item.grade ?? "").trim() || null,
             size_range: sizeRangeVal,
@@ -1405,7 +1513,7 @@ export default function GradeCollectionPage() {
         page,
         masterTotal,
         searchQuery: initialSearchQuery,
-        selectedCollectionId: initialSelectedCollectionId,
+        selectedSchool: initialSelectedSchool,
         totalCount,
         pageStart,
         pageEnd,
@@ -1414,10 +1522,10 @@ export default function GradeCollectionPage() {
 
     const [collectionGradeByProductId, setCollectionGradeByProductId] = useState({});
 
-    const [selectedCollectionId, setSelectedCollectionId] = useState(initialSelectedCollectionId || "");
+    const [selectedSchool, setSelectedSchool] = useState(initialSelectedSchool || "");
     useEffect(() => {
-        setSelectedCollectionId(initialSelectedCollectionId || "");
-    }, [initialSelectedCollectionId]);
+        setSelectedSchool(initialSelectedSchool || "");
+    }, [initialSelectedSchool]);
     const [addingCollectionFor, setAddingCollectionFor] = useState(null);
     const [addDraftByProductId, setAddDraftByProductId] = useState({});
     const [searchQuery, setSearchQuery] = useState(initialSearchQuery || "");
@@ -1425,8 +1533,7 @@ export default function GradeCollectionPage() {
 
     const PAGE_SIZE = 50;
 
-    const isCollectionMode = !!initialSelectedCollectionId && !initialSearchQuery;
-
+    const isSchoolMode = !!initialSelectedSchool && !initialSearchQuery;
 
 
 
@@ -1500,7 +1607,7 @@ export default function GradeCollectionPage() {
 
     useEffect(() => {
         setCursorStack([]);
-    }, [initialSearchQuery, initialSelectedCollectionId]);
+    }, [initialSearchQuery, initialSelectedSchool]);
 
     useEffect(() => {
         if (!currentJob) return;
@@ -1543,19 +1650,17 @@ export default function GradeCollectionPage() {
         ];
     }, [collections]);
 
-    const allowedCollectionFilterOptions = useMemo(() => {
-        const filtered = (collections || []).filter((c) =>
-            ALLOWED_COLLECTION_IDS.has(String(c.id))
-        );
+    const schoolFilterOptions = useMemo(() => {
+        const schools = getAllowedSchoolNames().sort((a, b) => a.localeCompare(b));
 
         return [
-            { label: "All collections", value: "" },
-            ...filtered.map((c) => ({
-                label: c.title,
-                value: c.id,
+            { label: "All schools", value: "" },
+            ...schools.map((school) => ({
+                label: school,
+                value: school,
             })),
         ];
-    }, [collections]);
+    }, []);
 
     const gidToTitle = useMemo(() => {
         const m = new Map();
@@ -1590,7 +1695,7 @@ export default function GradeCollectionPage() {
         setCollectionGradeByProductId(cg);
     }, [products]);
 
-    const headings = useMemo(() => [{ title: "Product" }, { title: "Age size range" }, { title: "Collection" },
+    const headings = useMemo(() => [{ title: "Product" }, { title: "Age size range" }, { title: "School" }, { title: "Collection" },
     { title: "Grade" }, { title: "Action" }], []);
 
     const filteredProducts = products || [];
@@ -1696,8 +1801,8 @@ export default function GradeCollectionPage() {
     useEffect(() => {
         const trimmed = String(searchQuery || "").trim();
         const initialTrimmed = String(initialSearchQuery || "").trim();
-        const selectedTrimmed = String(selectedCollectionId || "").trim();
-        const initialSelectedTrimmed = String(initialSelectedCollectionId || "").trim();
+        const selectedTrimmed = String(selectedSchool || "").trim();
+        const initialSelectedTrimmed = String(initialSelectedSchool || "").trim();
 
         if (trimmed === initialTrimmed && selectedTrimmed === initialSelectedTrimmed) return;
 
@@ -1720,17 +1825,9 @@ export default function GradeCollectionPage() {
             }
 
             if (selectedTrimmed) {
-                const selectedCollection = (collections || []).find(
-                    (c) => String(c.id) === String(selectedTrimmed)
-                );
-
-                const selectedCollectionTitle = String(selectedCollection?.title || "").trim();
-
-                if (selectedCollectionTitle) {
-                    params.set("collection", selectedCollectionTitle);
-                }
+                params.set("school", selectedTrimmed);
             } else {
-                params.delete("collection");
+                params.delete("school");
             }
 
             params.delete("page");
@@ -1747,17 +1844,16 @@ export default function GradeCollectionPage() {
         return () => clearTimeout(timer);
     }, [
         searchQuery,
-        selectedCollectionId,
+        selectedSchool,
         initialSearchQuery,
-        initialSelectedCollectionId,
-        collections,
+        initialSelectedSchool,
         navigate,
     ]);
     // Reset search loading when fetcher completes
     useEffect(() => {
         setIsSearchLoading(false);
         setIsCollectionFilterLoading(false);
-    }, [initialSearchQuery, initialSelectedCollectionId]);
+    }, [initialSearchQuery, initialSelectedSchool]);
 
     const getAdminProductUrl = (productGid) => {
         const numericId = getNumericIdFromGid(productGid);
@@ -1987,11 +2083,11 @@ export default function GradeCollectionPage() {
                                     >
                                         <div style={{ flex: 1 }}>
                                             <Select
-                                                label="Filter by collection"
+                                                label="Filter by school"
                                                 labelHidden
-                                                options={allowedCollectionFilterOptions}
-                                                value={selectedCollectionId}
-                                                onChange={setSelectedCollectionId}
+                                                options={schoolFilterOptions}
+                                                value={selectedSchool}
+                                                onChange={setSelectedSchool}
                                             />
                                         </div>
 
@@ -2079,6 +2175,12 @@ export default function GradeCollectionPage() {
                                                 <IndexTable.Cell>
                                                     <Text as="span" tone={p.age_size_range ? "base" : "subdued"}>
                                                         {p.age_size_range || ""}
+                                                    </Text>
+                                                </IndexTable.Cell>
+
+                                                <IndexTable.Cell>
+                                                    <Text as="span" tone={p.school_tag ? "base" : "subdued"}>
+                                                        {p.school_tag || "—"}
                                                     </Text>
                                                 </IndexTable.Cell>
 
@@ -2373,28 +2475,10 @@ export default function GradeCollectionPage() {
                                 <InlineStack align="space-between">
                                     {shouldShowPagination ? (
                                         <Pagination
-                                            hasPrevious={
-                                                isCollectionMode
-                                                    ? Number(after || 0) > 0
-                                                    : cursorStack.length > 0
-                                            }
+                                            hasPrevious={cursorStack.length > 0}
                                             hasNext={hasNextPage}
                                             onPrevious={() => {
                                                 const u = new URL(window.location.href);
-
-                                                if (isCollectionMode) {
-                                                    const currentOffset = Number(after || 0);
-                                                    const prevOffset = Math.max(0, currentOffset - PAGE_SIZE);
-
-                                                    if (prevOffset === 0) {
-                                                        u.searchParams.delete("after");
-                                                    } else {
-                                                        u.searchParams.set("after", String(prevOffset));
-                                                    }
-
-                                                    navigate(`${u.pathname}${u.search}`);
-                                                    return;
-                                                }
 
                                                 setCursorStack((prev) => {
                                                     const nextStack = [...prev];
@@ -2414,14 +2498,6 @@ export default function GradeCollectionPage() {
                                                 if (!endCursor) return;
 
                                                 const u = new URL(window.location.href);
-
-                                                if (isCollectionMode) {
-                                                    const currentOffset = Number(after || 0);
-                                                    const nextOffset = currentOffset + PAGE_SIZE;
-                                                    u.searchParams.set("after", String(nextOffset));
-                                                    navigate(`${u.pathname}${u.search}`);
-                                                    return;
-                                                }
 
                                                 setCursorStack((prev) => {
                                                     const currentCursor = after || "";
