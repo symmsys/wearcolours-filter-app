@@ -1,0 +1,17 @@
+api_version = "2026-01"
+
+[[extensions]]
+
+uid = "5bac2f30-a1ba-1a02-0928-17af5a62cd6eb209c7fb"
+
+type = "ui_extension"
+name = "customer-profile-bridge"
+handle = "customer-profile-bridge"
+
+[[extensions.targeting]]
+target = "customer-account.profile.block.render"
+module = "./src/Extension.jsx"
+
+[extensions.capabilities]
+network_access = true
+api_access = true
