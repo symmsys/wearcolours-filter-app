@@ -51,32 +51,74 @@ const COLLECTION_GID_TO_SCHOOL = {
 // Shopify metafield: custom.grade
 const GRADE_NAMESPACE = "custom";
 const GRADE_KEY = "grade";
-const GRADE_TYPE = "single_line_text_field";
 
-const METAFIELDS_SET = `#graphql
-  mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
-    metafieldsSet(metafields: $metafields) {
-      userErrors { field message }
-      metafields { id namespace key value }
-    }
-  }
-`;
+function parseSchoolTagText(value) {
+    return uniqStrings(
+        String(value || "")
+            .split(",")
+            .map((v) => cleanText(v))
+            .filter(Boolean)
+    );
+}
 
-const COLLECTION_ADD_PRODUCTS = `#graphql
-  mutation CollectionAddProducts($collectionId: ID!, $productIds: [ID!]!) {
-    collectionAddProducts(id: $collectionId, productIds: $productIds) {
-      userErrors { field message }
-    }
-  }
-`;
+function resolveCombinedSchoolTags({
+    shopifyTags = [],
+    dbSchoolTagText = "",
+}) {
+    const primary = resolveSchoolTagFromShopify(shopifyTags);
+    const dbTags = parseSchoolTagText(dbSchoolTagText);
 
-const COLLECTION_REMOVE_PRODUCTS = `#graphql
-  mutation CollectionRemoveProducts($collectionId: ID!, $productIds: [ID!]!) {
-    collectionRemoveProducts(id: $collectionId, productIds: $productIds) {
-      userErrors { field message }
+    const out = [];
+    const seen = new Set();
+
+    const pushValue = (value) => {
+        const cleanValue = cleanText(value);
+        if (!cleanValue) return;
+
+        const key = cleanValue.toLowerCase();
+        if (seen.has(key)) return;
+
+        seen.add(key);
+        out.push(cleanValue);
+    };
+
+    // Shopify primary first
+    pushValue(primary);
+
+    // Then DB text values
+    for (const tag of dbTags) {
+        pushValue(tag);
     }
-  }
-`;
+
+    return {
+        primary_school_tag: primary,
+        school_tags: out,
+    };
+}
+
+function mergePrimaryAndDbSchoolTags(primarySchoolTag = "", dbSchoolTagText = "") {
+    const out = [];
+    const seen = new Set();
+
+    const pushValue = (value) => {
+        const cleanValue = cleanText(value);
+        if (!cleanValue) return;
+
+        const key = cleanValue.toLowerCase();
+        if (seen.has(key)) return;
+
+        seen.add(key);
+        out.push(cleanValue);
+    };
+
+    pushValue(primarySchoolTag);
+
+    for (const tag of parseSchoolTagText(dbSchoolTagText)) {
+        pushValue(tag);
+    }
+
+    return out;
+}
 
 function getNumericIdFromGid(gid) {
     return String(gid || "").split("/").pop() || "";
@@ -90,25 +132,6 @@ function getAllowedSchoolNames() {
     return Object.values(COLLECTION_GID_TO_SCHOOL).map((v) => cleanText(v)).filter(Boolean);
 }
 
-function resolveSchoolTag({ dbSchoolTag = "", shopifyTags = [] }) {
-    const dbValue = cleanText(dbSchoolTag);
-    if (dbValue) return dbValue;
-
-    const allowedSchools = new Set(
-        getAllowedSchoolNames().map((v) => v.toLowerCase())
-    );
-
-    for (const tag of shopifyTags || []) {
-        const cleanTag = cleanText(tag);
-        if (!cleanTag) continue;
-
-        if (allowedSchools.has(cleanTag.toLowerCase())) {
-            return cleanTag;
-        }
-    }
-
-    return "";
-}
 
 function resolveSchoolTagFromShopify(shopifyTags = []) {
     const allowedSchools = new Set(
@@ -417,7 +440,6 @@ async function fetchProductsWithGradeAndCollection(
 
         const json = await parseGraphql(res);
         const conn = json?.data?.products;
-        const normalizedSearch = cleanText(searchText).toLowerCase();
 
         const shopifyItems = (conn?.edges || [])
             .map((e) => e?.node)
@@ -501,16 +523,27 @@ async function fetchProductsWithGradeAndCollection(
 
                 const firstCol = p?.collections?.edges?.[0]?.node || null;
                 const savedCollections = collectionsByProductId[p.id] || [];
+                const shopifyTags = Array.isArray(p?.tags) ? p.tags : [];
+
+                const dbSchoolTagText = savedCollections
+                    .map((row) => cleanText(row.school_tag))
+                    .filter(Boolean)
+                    .join(",");
+
+                const schoolMeta = resolveCombinedSchoolTags({
+                    shopifyTags,
+                    dbSchoolTagText,
+                });
 
                 return {
                     id: p.id,
                     title: p.title || "",
                     handle: p.handle || "",
                     grade: p?.metafield?.value || "",
-                    shopify_tags: Array.isArray(p?.tags) ? p.tags : [],
-                    school_tag: resolveSchoolTagFromShopify(
-                        Array.isArray(p?.tags) ? p.tags : []
-                    ),
+                    shopify_tags: shopifyTags,
+                    primary_school_tag: schoolMeta.primary_school_tag,
+                    school_tags: schoolMeta.school_tags,
+                    school_tag: schoolMeta.primary_school_tag,
                     imageUrl: p?.featuredImage?.url || "",
                     size: collectArray("size"),
                     size_type: firstValue("size type"),
@@ -840,11 +873,23 @@ async function fetchProductsWithGradeAndCollection(
             shopifySizeFallbackMap[cleanText(item.handle).toLowerCase()] ||
             "";
 
+        const dbSchoolTagText = savedCollections
+            .map((row) => cleanText(row.school_tag))
+            .filter(Boolean)
+            .join(",");
+
+        const schoolMeta = resolveCombinedSchoolTags({
+            shopifyTags: item.shopify_tags || [],
+            dbSchoolTagText,
+        });
+
         if (savedCollections.length > 0) {
             return {
                 ...item,
                 age_size_range: ageSizeRange,
-                school_tag: resolveSchoolTagFromShopify(item.shopify_tags || []),
+                primary_school_tag: schoolMeta.primary_school_tag,
+                school_tags: schoolMeta.school_tags,
+                school_tag: schoolMeta.primary_school_tag,
                 collectionId: savedCollections[0]?.id || "",
                 collectionTitle: savedCollections[0]?.title || "",
                 collectionHandle: savedCollections[0]?.handle || "",
@@ -855,7 +900,9 @@ async function fetchProductsWithGradeAndCollection(
         return {
             ...item,
             age_size_range: ageSizeRange,
-            school_tag: resolveSchoolTagFromShopify(item.shopify_tags || []),
+            primary_school_tag: schoolMeta.primary_school_tag,
+            school_tags: schoolMeta.school_tags,
+            school_tag: schoolMeta.primary_school_tag,
             savedCollections: [],
         };
     });
@@ -873,96 +920,6 @@ async function fetchProductsWithGradeAndCollection(
 }
 
 // Fetch product, all collections, and sizes from Shopify
-async function fetchProductByHandleWithCollectionsAndSizes(admin, handle) {
-    const res = await admin.graphql(
-        `#graphql
-      query ProductByHandle($handle: String!, $cFirst: Int!, $cAfter: String) {
-        productByHandle(handle: $handle) {
-          id
-          title
-          handle
-          variants(first: 250) {
-            edges { node { selectedOptions { name value } } }
-          }
-          collections(first: $cFirst, after: $cAfter) {
-            pageInfo { hasNextPage endCursor }
-            edges { node { id title handle } }
-          }
-        }
-      }
-    `,
-        { variables: { handle, cFirst: 250, cAfter: null } }
-    );
-
-    const json = await parseGraphql(res);
-    const p = json?.data?.productByHandle;
-    if (!p?.id) return null;
-
-    // collect sizes (variant option name "Size")
-    const variantEdges = p?.variants?.edges || [];
-    const sizes = [];
-    for (const ve of variantEdges) {
-        const opts = ve?.node?.selectedOptions || [];
-        for (const o of opts) {
-
-            if (String(o?.name || "").toLowerCase() === "size range" && o?.value) {
-                sizes.push(o.value);
-            }
-        }
-    }
-
-    // paginate collections if needed
-    let cols = (p.collections?.edges || []).map((e) => e.node).filter(Boolean);
-    let after = p.collections?.pageInfo?.endCursor || null;
-    let hasNext = !!p.collections?.pageInfo?.hasNextPage;
-
-    while (hasNext) {
-        const res2 = await admin.graphql(
-            `#graphql
-        query ProductCollections($handle: String!, $first: Int!, $after: String) {
-          productByHandle(handle: $handle) {
-            collections(first: $first, after: $after) {
-              pageInfo { hasNextPage endCursor }
-              edges { node { id title handle } }
-            }
-          }
-        }
-      `,
-            { variables: { handle, first: 250, after } }
-        );
-
-        const json2 = await parseGraphql(res2);
-        const conn = json2?.data?.productByHandle?.collections;
-        const edges = conn?.edges || [];
-        cols = cols.concat(edges.map((e) => e.node).filter(Boolean));
-
-        hasNext = !!conn?.pageInfo?.hasNextPage;
-        after = conn?.pageInfo?.endCursor || null;
-        if (!after) break;
-    }
-
-    // de-dupe collections
-    const seen = new Set();
-    const uniqCols = [];
-    for (const c of cols) {
-        const id = String(c?.id || "");
-        if (!id || seen.has(id)) continue;
-        seen.add(id);
-        uniqCols.push({
-            id,
-            title: c?.title || "",
-            handle: c?.handle || "",
-        });
-    }
-
-    return {
-        id: p.id,
-        title: p.title || "",
-        handle: p.handle || "",
-        sizes: uniqStrings(sizes),
-        collections: uniqCols,
-    };
-}
 
 async function fetchShopifySchoolTagByHandle(admin, handle) {
     const cleanHandle = cleanText(handle);
@@ -1443,23 +1400,49 @@ export const action = async ({ request }) => {
 
         const resolvedSchoolTag = await fetchShopifySchoolTagByHandle(admin, productHandle);
 
-        const upsertRecords = collectionGradesList.map((item) => ({
-            shopify_product_id: productId,
-            product_title: productTitle || null,
-            product_handle: productHandle || null,
+        const { data: existingRows, error: existingRowsErr } = await supabase
+            .from(EXTERNAL_TABLE)
+            .select("collection_id, school_tag")
+            .eq("shopify_product_id", productId);
 
-            collection_id: item.id || null,
-            collection_title: item.title || null,
-            collection_handle: String(item.handle ?? "").trim() || null,
+        if (existingRowsErr) {
+            throw new Error(existingRowsErr.message);
+        }
 
-            school_tag: resolvedSchoolTag || null,
+        const existingSchoolTagTextByCollectionId = {};
+        for (const row of existingRows || []) {
+            const key = cleanText(row?.collection_id);
+            if (!key) continue;
+            existingSchoolTagTextByCollectionId[key] = cleanText(row?.school_tag);
+        }
 
-            grade: String(item.grade ?? "").trim() || null,
-            size_range: sizeRangeVal,
-            size_type: sizeTypeVal,
-            size: sizeArr,
-            updated_at: new Date().toISOString(),
-        }));
+        const upsertRecords = collectionGradesList.map((item) => {
+            const existingText =
+                existingSchoolTagTextByCollectionId[cleanText(item.id)] || "";
+
+            const mergedSchoolTags = mergePrimaryAndDbSchoolTags(
+                resolvedSchoolTag,
+                existingText
+            );
+
+            return {
+                shopify_product_id: productId,
+                product_title: productTitle || null,
+                product_handle: productHandle || null,
+
+                collection_id: item.id || null,
+                collection_title: item.title || null,
+                collection_handle: String(item.handle ?? "").trim() || null,
+
+                school_tag: mergedSchoolTags.length ? mergedSchoolTags.join(",") : null,
+
+                grade: String(item.grade ?? "").trim() || null,
+                size_range: sizeRangeVal,
+                size_type: sizeTypeVal,
+                size: sizeArr,
+                updated_at: new Date().toISOString(),
+            };
+        });
 
         if (upsertRecords.length > 0) {
             const { error: upErr } = await supabase
@@ -1510,13 +1493,9 @@ export default function GradeCollectionPage() {
         hasNextPage,
         endCursor,
         after,
-        page,
         masterTotal,
         searchQuery: initialSearchQuery,
         selectedSchool: initialSelectedSchool,
-        totalCount,
-        pageStart,
-        pageEnd,
         syncJob,
     } = data;
 
@@ -1531,9 +1510,7 @@ export default function GradeCollectionPage() {
     const [searchQuery, setSearchQuery] = useState(initialSearchQuery || "");
     const [editingUnsavedCollection, setEditingUnsavedCollection] = useState(null);
 
-    const PAGE_SIZE = 50;
 
-    const isSchoolMode = !!initialSelectedSchool && !initialSearchQuery;
 
 
 
@@ -1553,7 +1530,6 @@ export default function GradeCollectionPage() {
 
     const isSaving = fetcher.state !== "idle";
     const isSyncing = syncFetcher.state !== "idle";
-    const isSearching = searchFetcher.state !== "idle";
 
     const currentJob =
         syncFetcher.state !== "idle"
@@ -2179,9 +2155,17 @@ export default function GradeCollectionPage() {
                                                 </IndexTable.Cell>
 
                                                 <IndexTable.Cell>
-                                                    <Text as="span" tone={p.school_tag ? "base" : "subdued"}>
-                                                        {p.school_tag || "—"}
-                                                    </Text>
+                                                    {Array.isArray(p.school_tags) && p.school_tags.length > 0 ? (
+                                                        <InlineStack gap="100" wrap>
+                                                            {p.school_tags.map((school) => (
+                                                                <Badge key={school} tone="info">
+                                                                    {school}
+                                                                </Badge>
+                                                            ))}
+                                                        </InlineStack>
+                                                    ) : (
+                                                        <Text as="span" tone="subdued">—</Text>
+                                                    )}
                                                 </IndexTable.Cell>
 
                                                 <IndexTable.Cell>

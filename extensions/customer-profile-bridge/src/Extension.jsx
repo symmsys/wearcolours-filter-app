@@ -308,7 +308,7 @@ function Extension() {
     return (
         <s-box padding="base">
             <s-stack direction="block" gap="base">
-                <s-heading>Customer Profile</s-heading>
+                <s-heading>Club Colours Profile</s-heading>
 
                 <Section title="Personal Information">
                     <DetailRow label="Full Name" value={fullName} />
