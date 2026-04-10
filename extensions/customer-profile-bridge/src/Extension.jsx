@@ -130,15 +130,15 @@ function DetailRow({ label, value }) {
 function Section({ title, children }) {
     return (
         <s-box
-            background="subdued"   // outer contrast layer
-            borderRadius="large"
-            padding="small"
+            background="base"   // outer contrast layer
+            borderRadius="small"
+        // padding="small"
         >
             <s-box
                 background="base"  // inner "card"
                 border="base"
                 borderRadius="large"
-                padding="base"
+                padding="small"
             >
                 <s-stack direction="block" gap="small">
                     <s-heading>{title}</s-heading>
