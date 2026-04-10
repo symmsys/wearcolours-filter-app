@@ -49,7 +49,7 @@ function toProductGid(shopifyProductId) {
 }
 
 function verifySignature(rawBody, signature) {
-    const secret = process.env.SCHOOL_TAG_SYNC_SHARED_SECRET;
+    const secret = process.env.CUSTOMER_BRIDGE_SECRET;
 
     if (!secret || !signature) return false;
 
