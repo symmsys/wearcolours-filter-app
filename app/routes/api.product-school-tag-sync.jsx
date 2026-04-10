@@ -13,7 +13,7 @@ const COLLECTION_GID_TO_SCHOOL_TAG = {
     "gid://shopify/Collection/276875247687": "Marlborough Shop",
 };
 
-const SCHOOL_TAG_TO_COLLECTION = Object.fromEntries(
+const SCHOOL_TAG_TO_COLLECTION_ID = Object.fromEntries(
     Object.entries(COLLECTION_GID_TO_SCHOOL_TAG).map(([collectionId, schoolTag]) => [
         String(schoolTag).trim().toLowerCase(),
         {
@@ -79,27 +79,25 @@ function parseSchoolTags(value) {
     ];
 }
 
-function getMappedCollectionsFromTags(tags = []) {
+function getMappedCollectionIdsFromTags(tags = []) {
     const mapped = new Map();
 
     for (const rawTag of tags) {
         const tag = cleanText(rawTag);
         if (!tag) continue;
 
-        const found = SCHOOL_TAG_TO_COLLECTION[tag.toLowerCase()];
+        const found = SCHOOL_TAG_TO_COLLECTION_ID[tag.toLowerCase()];
         if (!found) continue;
 
-        const key = found.collection_id;
+        const collectionId = found.collection_id;
 
-        if (!mapped.has(key)) {
-            mapped.set(key, {
-                collection_id: found.collection_id,
-                collection_title: found.collection_title,
-                collection_handle: found.collection_handle,
+        if (!mapped.has(collectionId)) {
+            mapped.set(collectionId, {
+                collection_id: collectionId,
                 matched_tags: [tag],
             });
         } else {
-            mapped.get(key).matched_tags.push(tag);
+            mapped.get(collectionId).matched_tags.push(tag);
         }
     }
 
@@ -115,6 +113,16 @@ const PRODUCT_BY_ID_QUERY = `#graphql
         handle
         tags
       }
+    }
+  }
+`;
+
+const COLLECTION_BY_ID_QUERY = `#graphql
+  query CollectionById($id: ID!) {
+    collection(id: $id) {
+      id
+      title
+      handle
     }
   }
 `;
@@ -256,17 +264,42 @@ export async function action({ request }) {
             updatedProduct = addResult?.data?.tagsAdd?.node || product;
         }
 
-        const mappedCollections = getMappedCollectionsFromTags(schoolTags);
+        const mappedCollections = getMappedCollectionIdsFromTags(schoolTags);
         const upsertedRows = [];
 
         for (const item of mappedCollections) {
+            const collectionResponse = await admin.graphql(COLLECTION_BY_ID_QUERY, {
+                variables: { id: item.collection_id },
+            });
+
+            const collectionResult = await collectionResponse.json();
+
+            if (collectionResult?.errors?.length) {
+                return jsonResponse(
+                    { ok: false, error: collectionResult.errors },
+                    { status: 500 }
+                );
+            }
+
+            const collection = collectionResult?.data?.collection;
+
+            if (!collection?.id) {
+                return jsonResponse(
+                    {
+                        ok: false,
+                        error: `Collection not found in Shopify for ID ${item.collection_id}`,
+                    },
+                    { status: 404 }
+                );
+            }
+
             const payload = {
                 shopify_product_id: shopifyProductId,
                 product_title: updatedProduct?.title || product?.title || null,
                 product_handle: updatedProduct?.handle || product?.handle || null,
-                collection_id: item.collection_id,
-                collection_title: item.collection_title,
-                collection_handle: item.collection_handle,
+                collection_id: collection.id,
+                collection_title: collection.title,
+                collection_handle: collection.handle,
                 school_tag: item.matched_tags.join(","),
                 updated_at: new Date().toISOString(),
             };
