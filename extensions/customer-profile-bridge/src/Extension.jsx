@@ -119,8 +119,7 @@ function formatAddress(street, apt, city, state, zip) {
 function DetailRow({ label, value }) {
     return (
         <s-box paddingBlockStart="small">
-            <s-text>{label}</s-text>
-            <s-text>{safeValue(value)}</s-text>
+            <s-text>{`${label}: ${safeValue(value)}`}</s-text>
         </s-box>
     );
 }
@@ -130,11 +129,24 @@ function DetailRow({ label, value }) {
  */
 function Section({ title, children }) {
     return (
-        <s-box border="base" borderRadius="large" padding="base">
-            <s-stack direction="block" gap="small">
-                <s-heading>{title}</s-heading>
-                {children}
-            </s-stack>
+        <s-box
+            background="subdued"   // outer contrast layer
+            borderRadius="large"
+            padding="small"
+        >
+            <s-box
+                background="base"  // inner "card"
+                border="base"
+                borderRadius="large"
+                padding="base"
+            >
+                <s-stack direction="block" gap="small">
+                    <s-heading>{title}</s-heading>
+                    <s-box paddingBlockStart="small">
+                        {children}
+                    </s-box>
+                </s-stack>
+            </s-box>
         </s-box>
     );
 }
@@ -302,20 +314,13 @@ function Extension() {
         );
     }
 
-    const fullName = `${data.customer_first_name || ''} ${data.customer_last_name || ''}`.trim();
+
     const students = Array.isArray(data.students) ? data.students : [];
 
     return (
         <s-box padding="base">
             <s-stack direction="block" gap="base">
                 <s-heading>Club Colours Profile</s-heading>
-
-                <Section title="Personal Information">
-                    <DetailRow label="Full Name" value={fullName} />
-                    <DetailRow label="Email" value={data.customer_email} />
-                    <DetailRow label="Phone" value={data.parent_phone} />
-                    <DetailRow label="SMS Opt In" value={formatYesNo(data.sms_opt_in)} />
-                </Section>
 
                 <Section title="Enrollment Details">
                     <DetailRow label="Enrollment Status" value={data.enrollment_status} />
