@@ -1671,7 +1671,7 @@ export default function GradeCollectionPage() {
         setCollectionGradeByProductId(cg);
     }, [products]);
 
-    const headings = useMemo(() => [{ title: "Product" }, { title: "Age size range" }, { title: "School" }, { title: "Collection" },
+    const headings = useMemo(() => [{ title: "Product" }, { title: "Age size range" }, { title: "School Tag" }, { title: "Collection" },
     { title: "Grade" }, { title: "Action" }], []);
 
     const filteredProducts = products || [];
@@ -2021,6 +2021,7 @@ export default function GradeCollectionPage() {
   to { transform: rotate(360deg); }
 }
     `}</style>
+
                                     </BlockStack>
                                 </Card>
 
