@@ -23,6 +23,39 @@ function clean(v) {
     return String(v ?? "").trim();
 }
 
+async function getAllowedSchools(supabase) {
+    const { data, error } = await supabase
+        .from(SETTINGS_TABLE)
+        .select("collection_id, collection_title, collection_handle")
+        .eq("show_in_school_dropdown", true)
+        .not("collection_handle", "is", null)
+        .order("collection_title", { ascending: true });
+
+    if (error) {
+        throw new Error(error.message || "Failed to fetch allowed schools");
+    }
+
+    return (data || []).filter((row) => clean(row.collection_handle));
+}
+
+async function isAllowedCollectionHandle(supabase, handle) {
+    const safeHandle = clean(handle);
+    if (!safeHandle) return false;
+
+    const { data, error } = await supabase
+        .from(SETTINGS_TABLE)
+        .select("collection_handle")
+        .eq("collection_handle", safeHandle)
+        .eq("show_in_school_dropdown", true)
+        .maybeSingle();
+
+    if (error) {
+        throw new Error(error.message || "Failed to validate collection handle");
+    }
+
+    return !!data;
+}
+
 /**
  * Get Shopify collection id from handle
  */
@@ -157,9 +190,37 @@ export async function loader({ request }) {
 
         const url = new URL(request.url);
 
+        const mode = clean(url.searchParams.get("mode"));
         const collectionHandle = clean(url.searchParams.get("collection_handle"));
         const gradeSelected = clean(url.searchParams.get("grade"));
         const productHandle = clean(url.searchParams.get("product_handle"));
+
+        const supabase = getSupabaseAdmin();
+
+        // SCHOOL LIST MODE
+        if (mode === "schools") {
+            const schools = await getAllowedSchools(supabase);
+
+            return new Response(
+                JSON.stringify({
+                    ok: true,
+                    mode: "schools",
+                    schools: schools.map((row) => ({
+                        collection_id: row.collection_id,
+                        collection_title: row.collection_title || "",
+                        collection_handle: row.collection_handle || "",
+                    })),
+                }),
+                {
+                    headers: {
+                        "Content-Type": "application/json; charset=utf-8",
+                        "Cache-Control": "public, max-age=30, stale-while-revalidate=300",
+                        Pragma: "no-cache",
+                        Expires: "0",
+                    },
+                }
+            );
+        }
 
         if (!collectionHandle) {
             return new Response(JSON.stringify({ ok: false, error: "Missing collection_handle" }), {
@@ -168,8 +229,14 @@ export async function loader({ request }) {
             });
         }
 
-        const supabase = getSupabaseAdmin();
 
+        const allowedCollection = await isAllowedCollectionHandle(supabase, collectionHandle);
+        if (!allowedCollection) {
+            return new Response(JSON.stringify({ ok: false, error: "Collection not allowed" }), {
+                status: 403,
+                headers: { "Content-Type": "application/json; charset=utf-8" },
+            });
+        }
         // 1) resolve collection_id from Shopify
         const collectionId = await fetchCollectionIdByHandle(admin, collectionHandle);
         if (!collectionId) {

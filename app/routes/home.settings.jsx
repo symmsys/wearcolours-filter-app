@@ -14,6 +14,7 @@ import {
   InlineStack,
   Layout,
   Page,
+  Checkbox,
   Select,
   Spinner,
   Text,
@@ -125,10 +126,12 @@ export const loader = async ({ request }) => {
   const settingsMap = {};
   for (const row of rows || []) {
     if (row.collection_id) {
-      settingsMap[row.collection_id] = row.default_sort_order || DEFAULT_SORT;
+      settingsMap[row.collection_id] = {
+        default_sort_order: row.default_sort_order || DEFAULT_SORT,
+        show_in_school_dropdown: !!row.show_in_school_dropdown,
+      };
     }
   }
-
   return { shop, collections, settingsMap };
 };
 
@@ -148,6 +151,7 @@ export const action = async ({ request }) => {
     const collectionTitle = cleanText(form.get("collectionTitle"));
     const collectionHandle = cleanText(form.get("collectionHandle"));
     const sortOrder = cleanText(form.get("sortOrder")) || DEFAULT_SORT;
+    const showInSchoolDropdown = String(form.get("showInSchoolDropdown")) === "true";
 
     if (!collectionId) return { ok: false, error: "Missing collectionId" };
 
@@ -161,6 +165,7 @@ export const action = async ({ request }) => {
             collection_title: collectionTitle || null,
             collection_handle: collectionHandle || null,
             default_sort_order: sortOrder,
+            show_in_school_dropdown: showInSchoolDropdown,
             updated_at: new Date().toISOString(),
           },
           { onConflict: "shop,collection_id" }
@@ -168,7 +173,13 @@ export const action = async ({ request }) => {
 
       if (upsertErr) throw new Error(upsertErr.message);
 
-      return { ok: true, intent, collectionId, sortOrder };
+      return {
+        ok: true,
+        intent,
+        collectionId,
+        sortOrder,
+        showInSchoolDropdown,
+      };
     } catch (e) {
       return { ok: false, error: safeErrToString(e) };
     }
@@ -180,16 +191,39 @@ export const action = async ({ request }) => {
 /* ─────────────────────────────────────────────
    Collection Row Component
 ───────────────────────────────────────────── */
-function CollectionRow({ collection, currentSort, onSave, isSaving, justSaved }) {
+function CollectionRow({
+  collection,
+  currentSort,
+  currentShowInDropdown,
+  onSave,
+  isSaving,
+  justSaved,
+}) {
   const [localSort, setLocalSort] = useState(currentSort || DEFAULT_SORT);
+  const [localShowInDropdown, setLocalShowInDropdown] = useState(!!currentShowInDropdown);
 
   useEffect(() => {
     setLocalSort(currentSort || DEFAULT_SORT);
   }, [currentSort]);
 
-  const handleChange = (value) => {
+  useEffect(() => {
+    setLocalShowInDropdown(!!currentShowInDropdown);
+  }, [currentShowInDropdown]);
+
+  const handleSortChange = (value) => {
     setLocalSort(value);
-    onSave(collection, value);
+    onSave(collection, {
+      sortOrder: value,
+      showInSchoolDropdown: localShowInDropdown,
+    });
+  };
+
+  const handleCheckboxChange = (checked) => {
+    setLocalShowInDropdown(checked);
+    onSave(collection, {
+      sortOrder: localSort,
+      showInSchoolDropdown: checked,
+    });
   };
 
   return (
@@ -204,7 +238,6 @@ function CollectionRow({ collection, currentSort, onSave, isSaving, justSaved })
         transition: "background 0.2s",
       }}
     >
-      {/* Collection info */}
       <div style={{ flex: 1, minWidth: 0 }}>
         <Text as="span" variant="bodyMd" fontWeight="semibold">
           {collection.title}
@@ -216,19 +249,26 @@ function CollectionRow({ collection, currentSort, onSave, isSaving, justSaved })
         </div>
       </div>
 
-      {/* Sort dropdown */}
       <div style={{ width: 220, flexShrink: 0 }}>
         <Select
           label="Default sort order"
           labelHidden
           options={SORT_OPTIONS}
           value={localSort}
-          onChange={handleChange}
+          onChange={handleSortChange}
           disabled={isSaving}
         />
       </div>
 
-      {/* Status badge */}
+      <div style={{ width: 180, flexShrink: 0 }}>
+        <Checkbox
+          label="Show in school dropdown"
+          checked={localShowInDropdown}
+          onChange={handleCheckboxChange}
+          disabled={isSaving}
+        />
+      </div>
+
       <div
         style={{
           width: 90,
@@ -247,8 +287,14 @@ function CollectionRow({ collection, currentSort, onSave, isSaving, justSaved })
         ) : justSaved ? (
           <Badge tone="success">Saved ✓</Badge>
         ) : (
-          <Badge tone={localSort !== DEFAULT_SORT ? "attention" : "new"}>
-            {localSort !== DEFAULT_SORT ? "Custom" : "Default"}
+          <Badge
+            tone={
+              localSort !== DEFAULT_SORT || localShowInDropdown
+                ? "attention"
+                : "new"
+            }
+          >
+            {localSort !== DEFAULT_SORT || localShowInDropdown ? "Custom" : "Default"}
           </Badge>
         )}
       </div>
@@ -308,8 +354,15 @@ export default function SettingsPage() {
 
   /* Auto-save on dropdown change */
   const handleSave = useCallback(
-    (collection, sortOrder) => {
-      setLocalSettings((prev) => ({ ...prev, [collection.id]: sortOrder }));
+    (collection, { sortOrder, showInSchoolDropdown }) => {
+      setLocalSettings((prev) => ({
+        ...prev,
+        [collection.id]: {
+          default_sort_order: sortOrder,
+          show_in_school_dropdown: !!showInSchoolDropdown,
+        },
+      }));
+
       setSavingCollectionId(collection.id);
       setSavedCollectionId(null);
 
@@ -320,6 +373,7 @@ export default function SettingsPage() {
           collectionTitle: collection.title,
           collectionHandle: collection.handle,
           sortOrder,
+          showInSchoolDropdown: showInSchoolDropdown ? "true" : "false",
         },
         { method: "POST" }
       );
@@ -327,9 +381,13 @@ export default function SettingsPage() {
     [fetcher]
   );
 
-  const customCount = Object.values(localSettings).filter(
-    (v) => v && v !== DEFAULT_SORT
-  ).length;
+  const customCount = Object.values(localSettings).filter((v) => {
+    if (!v || typeof v !== "object") return false;
+    return (
+      v.default_sort_order !== DEFAULT_SORT ||
+      v.show_in_school_dropdown === true
+    );
+  }).length;
 
   return (
     <Page
@@ -422,6 +480,11 @@ export default function SettingsPage() {
                   DEFAULT SORT ORDER
                 </Text>
               </div>
+              <div style={{ width: 180 }}>
+                <Text as="span" variant="bodySm" fontWeight="semibold" tone="subdued">
+                  SCHOOL DROPDOWN
+                </Text>
+              </div>
               <div style={{ width: 90 }}>
                 <Text as="span" variant="bodySm" fontWeight="semibold" tone="subdued">
                   STATUS
@@ -444,7 +507,12 @@ export default function SettingsPage() {
                   <CollectionRow
                     key={collection.id}
                     collection={collection}
-                    currentSort={localSettings[collection.id] || DEFAULT_SORT}
+                    currentSort={
+                      localSettings[collection.id]?.default_sort_order || DEFAULT_SORT
+                    }
+                    currentShowInDropdown={
+                      !!localSettings[collection.id]?.show_in_school_dropdown
+                    }
                     onSave={handleSave}
                     isSaving={
                       savingCollectionId === collection.id &&
