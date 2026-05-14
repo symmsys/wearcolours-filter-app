@@ -314,408 +314,432 @@ export async function action({ request }) {
         }
 
         const addParams = new URLSearchParams();
-        const createdItems = [];
 
-        for (let studentIndex = 0; studentIndex < students.length; studentIndex++) {
-            const student = students[studentIndex];
+let totalAmount = 0;
+const studentSummaries = [];
+const allPackKeys = new Set();
+const allPlanNames = new Set();
 
-            const annualAmount = toMoney(student?.annual_amount);
-            const packKey = cleanText(student?.pack_key).toLowerCase();
-            const planName = cleanText(student?.plan_name);
-            const studentName = cleanText(student?.student_name);
-            const schoolName = cleanText(student?.school_name);
-            const selections = Array.isArray(student?.selections)
-                ? student.selections
-                : [];
+for (let studentIndex = 0; studentIndex < students.length; studentIndex++) {
+    const student = students[studentIndex];
 
-            if (!annualAmount) {
-                return jsonResponse(
-                    {
-                        ok: false,
-                        error: `Invalid or missing annual_amount for student ${studentIndex + 1}`,
-                    },
-                    { status: 400 }
-                );
-            }
+    const annualAmount = toMoney(student?.annual_amount);
+    const packKey = cleanText(student?.pack_key).toLowerCase();
+    const planName = cleanText(student?.plan_name);
+    const studentName = cleanText(student?.student_name);
+    const schoolName = cleanText(student?.school_name);
+    const selections = Array.isArray(student?.selections)
+        ? student.selections
+        : [];
 
-            if (!packKey) {
-                return jsonResponse(
-                    {
-                        ok: false,
-                        error: `Missing pack_key for student ${studentIndex + 1}`,
-                    },
-                    { status: 400 }
-                );
-            }
+    if (!annualAmount) {
+        return jsonResponse(
+            {
+                ok: false,
+                error: `Invalid or missing annual_amount for student ${studentIndex + 1}`,
+            },
+            { status: 400 }
+        );
+    }
 
-            if (!["essentials", "complete", "full_wardrobe"].includes(packKey)) {
-                return jsonResponse(
-                    {
-                        ok: false,
-                        error: `Invalid pack_key for student ${studentIndex + 1}. Use essentials, complete, or full_wardrobe`,
-                    },
-                    { status: 400 }
-                );
-            }
+    if (!packKey) {
+        return jsonResponse(
+            {
+                ok: false,
+                error: `Missing pack_key for student ${studentIndex + 1}`,
+            },
+            { status: 400 }
+        );
+    }
 
-            const discountPercentage = getDiscountByPackKey(packKey);
-            const baseAmount = Number(annualAmount);
+    if (!["essentials", "complete", "full_wardrobe"].includes(packKey)) {
+        return jsonResponse(
+            {
+                ok: false,
+                error: `Invalid pack_key for student ${studentIndex + 1}. Use essentials, complete, or full_wardrobe`,
+            },
+            { status: 400 }
+        );
+    }
 
-            const discountAmount = Number(
-                ((baseAmount * discountPercentage) / 100).toFixed(2)
-            );
+    const baseAmount = Number(annualAmount);
+const discountPercentage = getDiscountByPackKey(packKey);
 
-            const finalAmount = Number(
-                (baseAmount - discountAmount).toFixed(2)
-            );
+const discountAmount = Number(
+    ((baseAmount * discountPercentage) / 100).toFixed(2)
+);
 
-            const productTitle = buildProductTitle({
-                customerName,
-                customerEmail: checkoutEmail,
-                studentName,
-            });
+const finalAmount = Number(
+    (baseAmount - discountAmount).toFixed(2)
+);
 
-            const descriptionHtml = `
-        <p>Generated annual subscription pack from Lovable.</p>
-        <p><strong>Customer:</strong> ${customerName || ""}</p>
-        <p><strong>Email:</strong> ${checkoutEmail || ""}</p>
-        <p><strong>Pack:</strong> ${planName || packKey}</p>
-        <p><strong>Student:</strong> ${studentName || ""}</p>
-        <p><strong>School:</strong> ${schoolName || ""}</p>
-    `;
+totalAmount += finalAmount;
+allPackKeys.add(packKey);
 
-            const productCreateResponse = await admin.graphql(PRODUCT_CREATE_MUTATION, {
-                variables: {
-                    product: {
-                        title: productTitle,
-                        descriptionHtml,
-                        vendor: "Club Colours",
-                        productType: "Dynamic Annual Pack",
-                        status: "ACTIVE",
-                        tags: [
-                            "lovable-generated",
-                            "annual-pack",
-                            `pack-${packKey}`,
-                            "auto-created",
-                        ],
-                    },
-                },
-            });
+if (planName) {
+    allPlanNames.add(planName);
+}
 
-            const productCreateResult = await productCreateResponse.json();
+studentSummaries.push({
+    studentIndex: studentIndex + 1,
+    studentName,
+    schoolName,
+    annualAmount: baseAmount.toFixed(2),
+    packKey,
+    planName,
+    discountPercentage,
+    discountAmount: discountAmount.toFixed(2),
+    finalAmount: finalAmount.toFixed(2),
+    selections,
+});
+}
 
-            if (productCreateResult?.errors?.length) {
-                return jsonResponse(
-                    { ok: false, error: productCreateResult.errors },
-                    { status: 500 }
-                );
-            }
+const totalDiscountedAmount = totalAmount.toFixed(2);
 
-            const productCreateErrors =
-                productCreateResult?.data?.productCreate?.userErrors || [];
+const productTitle = buildProductTitle({
+    customerName,
+    customerEmail: checkoutEmail,
+});
 
-            if (productCreateErrors.length) {
-                return jsonResponse(
-                    { ok: false, error: productCreateErrors },
-                    { status: 400 }
-                );
-            }
+const studentsHtml = studentSummaries
+    .map((student) => {
+        const selectionHtml = student.selections.length
+            ? `<ul>${student.selections
+                  .map((item) => {
+                      const title = cleanText(item.title);
+                      const size = cleanText(item.size);
+                      const quantity = cleanText(item.quantity || 1);
 
-            const product = productCreateResult?.data?.productCreate?.product;
-            const variant = product?.variants?.nodes?.[0];
+                      return `<li>${quantity} x ${title}${size ? ` - Size ${size}` : ""}</li>`;
+                  })
+                  .join("")}</ul>`
+            : "";
 
-            if (!product?.id || !variant?.id) {
-                return jsonResponse(
-                    {
-                        ok: false,
-                        error: `Product or default variant was not created for student ${studentIndex + 1}`,
-                    },
-                    { status: 500 }
-                );
-            }
+        return `
+            <div>
+                <p><strong>Student ${student.studentIndex}:</strong> ${student.studentName || ""}</p>
+                <p><strong>School:</strong> ${student.schoolName || ""}</p>
+                <p><strong>Pack:</strong> ${student.planName || student.packKey}</p>
+                <p><strong>Base Annual Amount:</strong> ${currencyCode} ${student.annualAmount}</p>
+<p><strong>Pack Discount:</strong> ${student.discountPercentage}%</p>
+<p><strong>Discount Amount:</strong> ${currencyCode} ${student.discountAmount}</p>
+<p><strong>Final Amount:</strong> ${currencyCode} ${student.finalAmount}</p>
+                ${selectionHtml}
+            </div>
+        `;
+    })
+    .join("");
 
-            const variantUpdateResponse = await admin.graphql(
-                PRODUCT_VARIANTS_BULK_UPDATE_MUTATION,
+const descriptionHtml = `
+    <p>Generated annual subscription pack from Lovable.</p>
+    <p><strong>Customer:</strong> ${customerName || ""}</p>
+    <p><strong>Email:</strong> ${checkoutEmail || ""}</p>
+    <p><strong>Total Discounted Amount:</strong> ${currencyCode} ${totalDiscountedAmount}</p>
+    <hr>
+    ${studentsHtml}
+`;
+
+const productCreateResponse = await admin.graphql(PRODUCT_CREATE_MUTATION, {
+    variables: {
+        product: {
+            title: productTitle,
+            descriptionHtml,
+            vendor: "Club Colours",
+            productType: "Dynamic Annual Pack",
+            status: "ACTIVE",
+            tags: [
+                "lovable-generated",
+                "annual-pack",
+                "multi-student",
+                "auto-created",
+            ],
+        },
+    },
+});
+
+const productCreateResult = await productCreateResponse.json();
+
+if (productCreateResult?.errors?.length) {
+    return jsonResponse(
+        { ok: false, error: productCreateResult.errors },
+        { status: 500 }
+    );
+}
+
+const productCreateErrors =
+    productCreateResult?.data?.productCreate?.userErrors || [];
+
+if (productCreateErrors.length) {
+    return jsonResponse(
+        { ok: false, error: productCreateErrors },
+        { status: 400 }
+    );
+}
+
+const product = productCreateResult?.data?.productCreate?.product;
+const variant = product?.variants?.nodes?.[0];
+
+if (!product?.id || !variant?.id) {
+    return jsonResponse(
+        {
+            ok: false,
+            error: "Product or default variant was not created",
+        },
+        { status: 500 }
+    );
+}
+
+const variantUpdateResponse = await admin.graphql(
+    PRODUCT_VARIANTS_BULK_UPDATE_MUTATION,
+    {
+        variables: {
+            productId: product.id,
+            variants: [
                 {
-                    variables: {
-                        productId: product.id,
-                        variants: [
-                            {
-                                id: variant.id,
-                                price: annualAmount,
-                                inventoryItem: {
-                                    requiresShipping: false,
-                                },
-                            },
-                        ],
-                    },
-                }
-            );
-
-            const variantUpdateResult = await variantUpdateResponse.json();
-
-            if (variantUpdateResult?.errors?.length) {
-                return jsonResponse(
-                    { ok: false, error: variantUpdateResult.errors },
-                    { status: 500 }
-                );
-            }
-
-            const variantUpdateErrors =
-                variantUpdateResult?.data?.productVariantsBulkUpdate?.userErrors || [];
-
-            if (variantUpdateErrors.length) {
-                return jsonResponse(
-                    { ok: false, error: variantUpdateErrors },
-                    { status: 400 }
-                );
-            }
-
-            const sellingPlanResponse = await admin.graphql(
-                SELLING_PLAN_GROUP_CREATE_MUTATION,
-                {
-                    variables: {
-                        input: {
-                            name: `Annual Subscription - ${planName || packKey} - ${studentName || studentIndex + 1} - ${Date.now()}`,
-                            merchantCode: `annual-${packKey}-${studentIndex + 1}-${Date.now()}`,
-                            options: ["Billing frequency"],
-                            position: 1,
-                            sellingPlansToCreate: [
-                                {
-                                    name: "Annual billing",
-                                    options: ["Annual billing"],
-                                    position: 1,
-                                    category: "SUBSCRIPTION",
-                                    billingPolicy: {
-                                        recurring: {
-                                            interval: "YEAR",
-                                            intervalCount: 1,
-                                        },
-                                    },
-                                    deliveryPolicy: {
-                                        recurring: {
-                                            interval: "YEAR",
-                                            intervalCount: 1,
-                                        },
-                                    },
-                                    inventoryPolicy: {
-                                        reserve: "ON_SALE",
-                                    },
-                                    pricingPolicies: [
-                                        {
-                                            fixed: {
-                                                adjustmentType: "PERCENTAGE",
-                                                adjustmentValue: {
-                                                    percentage: discountPercentage,
-                                                },
-                                            },
-                                        },
-                                    ],
-                                },
-                            ],
-                        },
-                        resources: {
-                            productVariantIds: [variant.id],
-                        },
-                    },
-                }
-            );
-
-            const sellingPlanResult = await sellingPlanResponse.json();
-
-            if (sellingPlanResult?.errors?.length) {
-                return jsonResponse(
-                    { ok: false, error: sellingPlanResult.errors },
-                    { status: 500 }
-                );
-            }
-
-            const sellingPlanErrors =
-                sellingPlanResult?.data?.sellingPlanGroupCreate?.userErrors || [];
-
-            if (sellingPlanErrors.length) {
-                return jsonResponse(
-                    { ok: false, error: sellingPlanErrors },
-                    { status: 400 }
-                );
-            }
-
-            const sellingPlanGroup =
-                sellingPlanResult?.data?.sellingPlanGroupCreate?.sellingPlanGroup;
-
-            const sellingPlan =
-                sellingPlanGroup?.sellingPlans?.edges?.[0]?.node || null;
-
-            if (!sellingPlan?.id) {
-                return jsonResponse(
-                    {
-                        ok: false,
-                        error: `Selling plan was not created for student ${studentIndex + 1}`,
-                    },
-                    { status: 500 }
-                );
-            }
-
-            let publishWarning = null;
-
-            try {
-                const publicationsResponse = await admin.graphql(PUBLICATIONS_QUERY);
-                const publicationsResult = await publicationsResponse.json();
-
-                const publicationId =
-                    publicationsResult?.data?.publications?.edges?.[0]?.node?.id || null;
-
-                if (publicationId) {
-                    const publishResponse = await admin.graphql(
-                        PUBLISHABLE_PUBLISH_MUTATION,
-                        {
-                            variables: {
-                                id: product.id,
-                                input: [
-                                    {
-                                        publicationId,
-                                    },
-                                ],
-                            },
-                        }
-                    );
-
-                    const publishResult = await publishResponse.json();
-                    const publishErrors =
-                        publishResult?.data?.publishablePublish?.userErrors || [];
-
-                    if (publishResult?.errors?.length || publishErrors.length) {
-                        publishWarning =
-                            "Product created, but publishing to Online Store failed. Cart URL may not work until product is available on Online Store.";
-                    }
-                } else {
-                    publishWarning =
-                        "Product created, but no publication ID found. Cart URL may not work until product is available on Online Store.";
-                }
-            } catch {
-                publishWarning =
-                    "Product created, but publishing step failed. Cart URL may not work until product is available on Online Store.";
-            }
-
-            const numericVariantId = gidToNumericId(variant.id);
-            const numericSellingPlanId = gidToNumericId(sellingPlan.id);
-
-            addParams.set(`items[${studentIndex}][id]`, numericVariantId);
-            addParams.set(`items[${studentIndex}][quantity]`, "1");
-            addParams.set(`items[${studentIndex}][selling_plan]`, numericSellingPlanId);
-
-            addParams.set(
-                `items[${studentIndex}][properties][Billing Type]`,
-                "Annual Subscription"
-            );
-
-            addParams.set(
-                `items[${studentIndex}][properties][Pack Key]`,
-                packKey
-            );
-
-            addParams.set(
-                `items[${studentIndex}][properties][Base Price]`,
-                `$${baseAmount.toFixed(2)}`
-            );
-
-            addParams.set(
-                `items[${studentIndex}][properties][Pack Discount]`,
-                `${discountPercentage}%`
-            );
-
-            addParams.set(
-                `items[${studentIndex}][properties][Discount Amount]`,
-                `$${discountAmount.toFixed(2)}`
-            );
-
-            addParams.set(
-                `items[${studentIndex}][properties][Final Annual Price]`,
-                `$${finalAmount.toFixed(2)}`
-            );
-
-
-            if (customerName) {
-                addParams.set(
-                    `items[${studentIndex}][properties][Customer Name]`,
-                    customerName
-                );
-            }
-
-            if (planName) {
-                addParams.set(
-                    `items[${studentIndex}][properties][Plan Name]`,
-                    planName
-                );
-            }
-
-            if (studentName) {
-                addParams.set(
-                    `items[${studentIndex}][properties][Student Name]`,
-                    studentName
-                );
-            }
-
-            if (schoolName) {
-                addParams.set(
-                    `items[${studentIndex}][properties][School Name]`,
-                    schoolName
-                );
-            }
-
-            if (selections.length) {
-                selections.forEach((item, selectionIndex) => {
-                    const title = cleanText(item.title);
-                    const size = cleanText(item.size);
-                    const quantity = cleanText(item.quantity || 1);
-
-                    const label = `Selected Item ${selectionIndex + 1}`;
-                    const value = `${quantity} x ${title}${size ? ` - Size ${size}` : ""}`;
-
-                    addParams.set(
-                        `items[${studentIndex}][properties][${label}]`,
-                        value
-                    );
-                });
-            }
-
-            createdItems.push({
-                studentIndex: studentIndex + 1,
-                studentName,
-                schoolName,
-                packKey,
-                planName,
-                product: {
-                    id: product.id,
-                    title: product.title,
-                    handle: product.handle,
-                },
-                variant: {
                     id: variant.id,
-                    numericId: numericVariantId,
-                    price: annualAmount,
+                    price: totalDiscountedAmount,
+                    inventoryItem: {
+                        requiresShipping: false,
+                    },
                 },
-                sellingPlanGroup: {
-                    id: sellingPlanGroup.id,
-                    name: sellingPlanGroup.name,
-                    merchantCode: sellingPlanGroup.merchantCode,
+            ],
+        },
+    }
+);
+
+const variantUpdateResult = await variantUpdateResponse.json();
+
+if (variantUpdateResult?.errors?.length) {
+    return jsonResponse(
+        { ok: false, error: variantUpdateResult.errors },
+        { status: 500 }
+    );
+}
+
+const variantUpdateErrors =
+    variantUpdateResult?.data?.productVariantsBulkUpdate?.userErrors || [];
+
+if (variantUpdateErrors.length) {
+    return jsonResponse(
+        { ok: false, error: variantUpdateErrors },
+        { status: 400 }
+    );
+}
+
+const sellingPlanResponse = await admin.graphql(
+    SELLING_PLAN_GROUP_CREATE_MUTATION,
+    {
+        variables: {
+            input: {
+                name: `Annual Subscription - ${customerName || "Customer"} - ${Date.now()}`,
+                merchantCode: `annual-multi-student-${Date.now()}`,
+                options: ["Billing frequency"],
+                position: 1,
+                sellingPlansToCreate: [
+                    {
+                        name: "Annual billing",
+                        options: ["Annual billing"],
+                        position: 1,
+                        category: "SUBSCRIPTION",
+                        billingPolicy: {
+                            recurring: {
+                                interval: "YEAR",
+                                intervalCount: 1,
+                            },
+                        },
+                        deliveryPolicy: {
+                            recurring: {
+                                interval: "YEAR",
+                                intervalCount: 1,
+                            },
+                        },
+                        inventoryPolicy: {
+                            reserve: "ON_SALE",
+                        },
+                    },
+                ],
+            },
+            resources: {
+                productVariantIds: [variant.id],
+            },
+        },
+    }
+);
+
+const sellingPlanResult = await sellingPlanResponse.json();
+
+if (sellingPlanResult?.errors?.length) {
+    return jsonResponse(
+        { ok: false, error: sellingPlanResult.errors },
+        { status: 500 }
+    );
+}
+
+const sellingPlanErrors =
+    sellingPlanResult?.data?.sellingPlanGroupCreate?.userErrors || [];
+
+if (sellingPlanErrors.length) {
+    return jsonResponse(
+        { ok: false, error: sellingPlanErrors },
+        { status: 400 }
+    );
+}
+
+const sellingPlanGroup =
+    sellingPlanResult?.data?.sellingPlanGroupCreate?.sellingPlanGroup;
+
+const sellingPlan =
+    sellingPlanGroup?.sellingPlans?.edges?.[0]?.node || null;
+
+if (!sellingPlan?.id) {
+    return jsonResponse(
+        {
+            ok: false,
+            error: "Selling plan was not created",
+        },
+        { status: 500 }
+    );
+}
+
+let publishWarning = null;
+
+try {
+    const publicationsResponse = await admin.graphql(PUBLICATIONS_QUERY);
+    const publicationsResult = await publicationsResponse.json();
+
+    const publicationId =
+        publicationsResult?.data?.publications?.edges?.[0]?.node?.id || null;
+
+    if (publicationId) {
+        const publishResponse = await admin.graphql(
+            PUBLISHABLE_PUBLISH_MUTATION,
+            {
+                variables: {
+                    id: product.id,
+                    input: [
+                        {
+                            publicationId,
+                        },
+                    ],
                 },
-                sellingPlan: {
-                    id: sellingPlan.id,
-                    numericId: numericSellingPlanId,
-                    name: sellingPlan.name,
-                    discountPercentage,
-                },
-                pricing: {
-                    baseAmount: baseAmount.toFixed(2),
-                    discountPercentage,
-                    discountAmount: discountAmount.toFixed(2),
-                    finalAmount: finalAmount.toFixed(2),
-                    currencyCode,
-                },
-                publishWarning,
-            });
+            }
+        );
+
+        const publishResult = await publishResponse.json();
+        const publishErrors =
+            publishResult?.data?.publishablePublish?.userErrors || [];
+
+        if (publishResult?.errors?.length || publishErrors.length) {
+            publishWarning =
+                "Product created, but publishing to Online Store failed. Cart URL may not work until product is available on Online Store.";
         }
+    } else {
+        publishWarning =
+            "Product created, but no publication ID found. Cart URL may not work until product is available on Online Store.";
+    }
+} catch {
+    publishWarning =
+        "Product created, but publishing step failed. Cart URL may not work until product is available on Online Store.";
+}
+
+    const numericVariantId = gidToNumericId(variant.id);
+const numericSellingPlanId = gidToNumericId(sellingPlan.id);
+
+addParams.set("id", numericVariantId);
+addParams.set("quantity", "1");
+addParams.set("selling_plan", numericSellingPlanId);
+
+addParams.set("properties[Billing Type]", "Annual Subscription");
+addParams.set("properties[Customer ID]", customerId);
+addParams.set("properties[Customer Name]", customerName);
+addParams.set("properties[Customer Email]", checkoutEmail);
+addParams.set("properties[Total Discounted Amount]", `${currencyCode} ${totalDiscountedAmount}`);
+addParams.set("properties[Student Count]", String(studentSummaries.length));
+addParams.set("properties[Pack Keys]", Array.from(allPackKeys).join(", "));
+addParams.set("properties[Plan Names]", Array.from(allPlanNames).join(", "));
+
+studentSummaries.forEach((student) => {
+    const prefix = `Student ${student.studentIndex}`;
+
+    if (student.studentName) {
+        addParams.set(`properties[${prefix} Name]`, student.studentName);
+    }
+
+    if (student.schoolName) {
+        addParams.set(`properties[${prefix} School]`, student.schoolName);
+    }
+
+    if (student.packKey) {
+        addParams.set(`properties[${prefix} Pack Key]`, student.packKey);
+    }
+
+    if (student.planName) {
+        addParams.set(`properties[${prefix} Plan Name]`, student.planName);
+    }
+
+    addParams.set(
+    `properties[${prefix} Base Annual Amount]`,
+    `${currencyCode} ${student.annualAmount}`
+);
+
+addParams.set(
+    `properties[${prefix} Pack Discount]`,
+    `${student.discountPercentage}%`
+);
+
+addParams.set(
+    `properties[${prefix} Discount Amount]`,
+    `${currencyCode} ${student.discountAmount}`
+);
+
+addParams.set(
+    `properties[${prefix} Final Amount]`,
+    `${currencyCode} ${student.finalAmount}`
+);
+
+    if (student.selections.length) {
+        student.selections.forEach((item, selectionIndex) => {
+            const title = cleanText(item.title);
+            const size = cleanText(item.size);
+            const quantity = cleanText(item.quantity || 1);
+
+            const label = `${prefix} Selected Item ${selectionIndex + 1}`;
+            const value = `${quantity} x ${title}${size ? ` - Size ${size}` : ""}`;
+
+            addParams.set(`properties[${label}]`, value);
+        });
+    }
+});
+
+const createdItem = {
+    product: {
+        id: product.id,
+        title: product.title,
+        handle: product.handle,
+    },
+    variant: {
+        id: variant.id,
+        numericId: numericVariantId,
+        price: totalDiscountedAmount,
+    },
+    sellingPlanGroup: {
+        id: sellingPlanGroup.id,
+        name: sellingPlanGroup.name,
+        merchantCode: sellingPlanGroup.merchantCode,
+    },
+    sellingPlan: {
+        id: sellingPlan.id,
+        numericId: numericSellingPlanId,
+        name: sellingPlan.name,
+    },
+    pricing: {
+        totalDiscountedAmount,
+        currencyCode,
+    },
+    students: studentSummaries,
+    publishWarning,
+};
+        
 
         const address = customer?.defaultAddress || null;
 
@@ -807,13 +831,13 @@ export async function action({ request }) {
         )}`;
 
         return jsonResponse({
-            ok: true,
-            message: "Dynamic annual subscription products created",
-            checkoutUrl,
-            createdItems,
-        });
+    ok: true,
+    message: "Dynamic annual subscription product created",
+    checkoutUrl,
+    createdItem,
+});
 
-        
+
     } catch (error) {
         console.error("Dynamic subscription API error:", error);
 
