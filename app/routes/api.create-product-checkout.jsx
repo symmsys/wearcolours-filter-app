@@ -644,13 +644,13 @@ export async function action({ request }) {
         addParams.set("quantity", "1");
         addParams.set("selling_plan", numericSellingPlanId);
 
-        addParams.set("properties[Billing Type]", "Annual Subscription");
-        addParams.set("properties[Customer ID]", customerId);
-        addParams.set("properties[Customer Name]", customerName);
-        addParams.set("properties[Customer Email]", checkoutEmail);
+        addParams.set("properties[_Billing Type]", "Annual Subscription");
+        // addParams.set("properties[Customer ID]", customerId);
+        addParams.set("properties[_Customer Name]", customerName);
+        addParams.set("properties[_Customer Email]", checkoutEmail);
         addParams.set("properties[Total Discounted Amount]", `${currencyCode} ${totalDiscountedAmount}`);
         addParams.set("properties[Student Count]", String(studentSummaries.length));
-        addParams.set("properties[Pack Keys]", Array.from(allPackKeys).join(", "));
+        // addParams.set("properties[Pack Keys]", Array.from(allPackKeys).join(", "));
         addParams.set("properties[Plan Names]", Array.from(allPlanNames).join(", "));
 
         studentSummaries.forEach((student) => {
@@ -665,7 +665,7 @@ export async function action({ request }) {
             }
 
             if (student.packKey) {
-                addParams.set(`properties[${prefix} Pack Key]`, student.packKey);
+                addParams.set(`properties[_${prefix} Pack Key]`, student.packKey);
             }
 
             if (student.planName) {
